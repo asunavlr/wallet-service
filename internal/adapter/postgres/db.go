@@ -55,6 +55,32 @@ func (u *UnitOfWork) Do(ctx context.Context, fn func(context.Context, *app.Repos
 	return nil
 }
 
+// Snapshot roda a função numa transação REPEATABLE READ somente-leitura.
+//
+// REPEATABLE READ fixa o snapshot no primeiro statement e o mantém até o fim:
+// saldo e ledger passam a ser lidos do mesmo instante. Somente-leitura deixa
+// isso explícito para o banco e impede que um caminho de leitura escreva por
+// engano.
+//
+// Não bloqueia escritores: eles seguem normalmente, e esta transação apenas
+// continua vendo o mundo como ele era quando começou — que é exatamente o que
+// uma conferência precisa.
+func (u *UnitOfWork) Snapshot(ctx context.Context, fn func(context.Context, *app.Repos) error) error {
+	tx, err := u.pool.BeginTx(ctx, pgx.TxOptions{
+		IsoLevel:   pgx.RepeatableRead,
+		AccessMode: pgx.ReadOnly,
+	})
+	if err != nil {
+		return classificar(err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	if err := fn(ctx, Repos(tx)); err != nil {
+		return err
+	}
+	return classificar(tx.Commit(ctx))
+}
+
 // Repos monta os repositórios sobre um executor.
 func Repos(q Querier) *app.Repos {
 	return &app.Repos{

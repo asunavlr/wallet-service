@@ -87,11 +87,26 @@ tanto por `*pgxpool.Pool` quanto por `pgx.Tx`. Quem abre e fecha a transação �
 o **caso de uso**, via `UnitOfWork.Do`, nunca o repositório. É isso que permite
 confirmar saldo, ledger, estado da transação, inbox e outbox no mesmo commit.
 
-**Nível de isolamento: READ COMMITTED.** Não `SERIALIZABLE`. Toda coordenação
-financeira já passa pelo `FOR UPDATE` da carteira, então o nível serializável
-não acrescentaria garantia — acrescentaria erros de serialização sob disputa,
+**Dois níveis de isolamento, por propósito diferente.**
+
+*Escrita: READ COMMITTED.* Não `SERIALIZABLE`. Toda coordenação financeira já
+passa pelo `FOR UPDATE` da carteira, então o nível serializável não
+acrescentaria garantia — acrescentaria erros de serialização sob disputa,
 exatamente no cenário das duas apostas concorrentes, e exigiria uma camada de
 retry para resolver um problema criado por ele mesmo.
+
+*Leitura de conferência: REPEATABLE READ, somente-leitura* (`UnitOfWork.
+Snapshot`). READ COMMITTED tira um snapshot NOVO a cada statement, e a
+reconciliação lê o saldo e depois soma o ledger: uma operação commitada entre
+as duas leituras produz uma diferença sem que nada esteja errado. O enunciado
+pede a comparação "em uma visão consistente dos dados", e é isso que
+`REPEATABLE READ` entrega — sem bloquear escritores, que seguem normalmente
+enquanto a conferência continua vendo o mundo como era quando começou.
+
+Uma divergência falsa não é cosmética: ela dispara a métrica de alarme,
+registra erro no log e responde ao provedor que a carteira está inconsistente.
+Quem for investigar não acha nada — e na vez em que o alarme tocar de verdade,
+ninguém olha.
 
 **Lock pessimista por carteira.** `SELECT ... FROM wallets WHERE id = $1 FOR
 UPDATE`.
@@ -333,6 +348,13 @@ O worker lista as pendências vencidas com `FOR UPDATE SKIP LOCKED`, e para cada
 uma trava a carteira **antes** da linha — a mesma ordem do fluxo HTTP, porque
 locks adquiridos em ordens diferentes por caminhos diferentes é exatamente como
 nasce um deadlock.
+
+A pendência é **relida depois** de a carteira ser travada. O `SKIP LOCKED` da
+listagem solta o lock quando aquela transação commita, então duas instâncias
+podem sair com a mesma pendência na mão; sem a releitura, a segunda trabalharia
+sobre um estado já vencido e só descobriria no fim, quando a trigger do banco
+recusasse a escrita. Funciona, mas é gastar uma transação inteira para
+descobrir o que dá para saber antes de começar.
 
 **A decisão mora no caso de uso, não no worker.** `ResolvePending` chama o
 mesmo `Decide`: as regras não podem divergir entre quem chegou na hora certa e

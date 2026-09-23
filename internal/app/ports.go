@@ -22,6 +22,16 @@ import (
 // e não têm opinião sobre o limite dela.
 type UnitOfWork interface {
 	Do(ctx context.Context, fn func(context.Context, *Repos) error) error
+	// Snapshot roda uma LEITURA sobre uma visão estável dos dados: todos os
+	// statements enxergam o mesmo instante, mesmo que outra transação commite
+	// no meio.
+	//
+	// Existe porque READ COMMITTED tira um snapshot NOVO a cada statement. A
+	// reconciliação lê o saldo e depois soma o ledger; uma operação commitada
+	// entre as duas leituras produziria uma diferença sem que nada estivesse
+	// errado — e o enunciado pede a comparação "em uma visão consistente dos
+	// dados".
+	Snapshot(ctx context.Context, fn func(context.Context, *Repos) error) error
 }
 
 // Repos reúne os repositórios ligados a uma mesma transação.

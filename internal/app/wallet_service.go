@@ -136,12 +136,14 @@ type Reconciliation struct {
 // saldo. Divergência é reportada na resposta, no log e numa métrica — corrigir
 // exigiria novo lançamento, porque o ledger é append-only.
 //
-// A leitura acontece dentro de uma transação para que saldo e ledger venham
-// da mesma visão consistente; ler fora daria uma diferença falsa se uma
-// operação commitasse no meio.
+// A leitura usa Snapshot, e não Do: em READ COMMITTED cada statement tira um
+// snapshot novo, e uma operação commitada entre a leitura do saldo e a soma
+// do ledger produziria uma diferença sem que nada estivesse errado. Uma
+// divergência falsa dispara o alarme, registra erro e diz ao provedor que a
+// carteira está inconsistente — e quem investigar não acha nada.
 func (s *WalletService) Reconcile(ctx context.Context, walletID uuid.UUID) (Reconciliation, error) {
 	var out Reconciliation
-	err := s.uow.Do(ctx, func(ctx context.Context, r *Repos) error {
+	err := s.uow.Snapshot(ctx, func(ctx context.Context, r *Repos) error {
 		w, err := r.Wallets.ByID(ctx, walletID)
 		if err != nil {
 			return err
@@ -183,7 +185,7 @@ func (s *WalletService) Reconcile(ctx context.Context, walletID uuid.UUID) (Reco
 // Get devolve a carteira.
 func (s *WalletService) Get(ctx context.Context, id uuid.UUID) (*wallet.Wallet, error) {
 	var w *wallet.Wallet
-	err := s.uow.Do(ctx, func(ctx context.Context, r *Repos) error {
+	err := s.uow.Snapshot(ctx, func(ctx context.Context, r *Repos) error {
 		achada, err := r.Wallets.ByID(ctx, id)
 		if err != nil {
 			return err
@@ -207,7 +209,7 @@ func (s *WalletService) LedgerPage(ctx context.Context, id uuid.UUID, cursor str
 	}
 	var linhas []LedgerRow
 	var proximo string
-	err := s.uow.Do(ctx, func(ctx context.Context, r *Repos) error {
+	err := s.uow.Snapshot(ctx, func(ctx context.Context, r *Repos) error {
 		if _, err := r.Wallets.ByID(ctx, id); err != nil {
 			return err
 		}

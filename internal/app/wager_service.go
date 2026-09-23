@@ -483,20 +483,34 @@ func resultado(t *wager.Transaction, replay bool) Result {
 // locks adquiridos em ordens diferentes por caminhos diferentes é como nasce
 // um deadlock.
 func (s *WagerService) ResolvePending(ctx context.Context, r *Repos, id uuid.UUID) error {
-	tx, err := r.Transactions.ByID(ctx, id)
+	// Primeira leitura só para descobrir de qual carteira é a pendência.
+	inicial, err := r.Transactions.ByID(ctx, id)
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
 			return nil // outra instância já tratou
 		}
 		return err
 	}
-	if tx.Status().Terminal() {
-		return nil
-	}
 
-	w, err := r.Wallets.Lock(ctx, tx.WalletID())
+	w, err := r.Wallets.Lock(ctx, inicial.WalletID())
 	if err != nil {
 		return err
+	}
+
+	// RELÊ depois de travar. Duas instâncias podem listar a mesma pendência:
+	// o SKIP LOCKED da listagem solta o lock ao commitar, e sem esta releitura
+	// a segunda trabalharia sobre um estado já vencido — confiando na trigger
+	// do banco para recusar a escrita no fim. Funciona, mas é gastar uma
+	// transação inteira para descobrir o que dá para saber agora.
+	tx, err := r.Transactions.ByID(ctx, id)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return nil
+		}
+		return err
+	}
+	if tx.Status().Terminal() {
+		return nil // outra instância concluiu enquanto esperávamos o lock
 	}
 	agora := s.clock.Now()
 
