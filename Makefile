@@ -1,6 +1,6 @@
 GO ?= go
 
-.PHONY: build test race vet fmt up down test-integration test-e2e test-all migrate-up migrate-down
+.PHONY: build test race vet fmt up down test-integration test-e2e test-all verificar migrate-up migrate-down
 
 build:
 	$(GO) build ./...
@@ -33,6 +33,11 @@ test-e2e:
 
 ## Tudo: unitários, integração e ponta a ponta. Exige o compose no ar.
 test-all: vet test race test-integration test-e2e
+
+## Confere a solução contra o enunciado, item a item, com evidência para cada
+## exigência. Exige o compose no ar.
+verificar:
+	./scripts/verificar.sh
 
 ## Migrations. DB=wallet por padrão; DB=wallet_test para o banco dos testes.
 ## O serviço `migrate` do compose já aplica nos dois ao subir; estes alvos

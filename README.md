@@ -281,6 +281,29 @@ go test -tags e2e ./test/e2e/ -v -timeout 20m
 make test-all      # vet + unitários + -race + integração + e2e
 ```
 
+### Conferir contra o enunciado
+
+```sh
+make verificar
+```
+
+Percorre as exigências do desafio uma a uma e imprime a evidência de cada
+uma — o teste que roda, a constraint que existe, a rota que recusa. Nada é
+afirmação: tudo é comando executado na hora.
+
+```
+ELIMINATÓRIOS
+  ✓ dinheiro nunca passa por float (varredura da AST)
+  ✓ idempotência sobrevive ao reinício dos processos
+  ✓ provedor não navega em carteira alheia
+  …
+INVARIANTES IMPOSTAS PELO BANCO
+  ✓ ledger é append-only (triggers)
+  ✓ runtime sem UPDATE no ledger
+  …
+  40 verificações OK, 0 falharam
+```
+
 Os testes e2e usam as três instâncias e tokens reais do Keycloak.
 
 Alguns deles derrubam e reiniciam containers de propósito (os cenários de
