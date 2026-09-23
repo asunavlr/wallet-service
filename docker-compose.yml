@@ -1,0 +1,112 @@
+# Ambiente local completo: Postgres, LocalStack, Keycloak e TRÊS instâncias
+# da aplicação.
+#
+# Três instâncias não é enfeite: o enunciado exige demonstrar as garantias
+# com pelo menos três processos independentes, cada um com suas próprias
+# conexões e memória. Elas ficam atrás do Postgres compartilhado e disputam
+# as mesmas carteiras, a mesma fila e a mesma outbox.
+
+name: wallet-service
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: wallet
+      POSTGRES_PASSWORD: dev
+      POSTGRES_DB: wallet
+    ports: ["5432:5432"]
+    volumes:
+      # Cria o usuário de execução sem privilégio no ledger. Só roda em
+      # volume vazio: use `docker compose down -v` para reexecutar.
+      - ./deploy/postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U wallet -d wallet"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  localstack:
+    image: localstack/localstack:3
+    environment:
+      SERVICES: sqs
+      DEBUG: "0"
+    ports: ["4566:4566"]
+    volumes:
+      - ./deploy/localstack:/etc/localstack/init/ready.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "awslocal sqs list-queues >/dev/null 2>&1"]
+      interval: 3s
+      timeout: 5s
+      retries: 40
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.0
+    command: ["start-dev", "--import-realm", "--http-port=8080"]
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: admin
+      KC_HEALTH_ENABLED: "true"
+    ports: ["8081:8080"]
+    volumes:
+      # Provisionamento automático do realm: o enunciado exige que o IdP suba
+      # configurado, sem passo manual.
+      - ./deploy/keycloak:/opt/keycloak/data/import:ro
+    healthcheck:
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/localhost/9000 && echo -e 'GET /health/ready HTTP/1.1\\nhost: localhost\\n' >&3 && cat <&3 | grep -q '\"UP\"'"]
+      interval: 5s
+      timeout: 5s
+      retries: 40
+
+  # As migrations rodam como DONO do schema, separadas da aplicação, que
+  # conecta com o papel restrito. Se a aplicação pudesse migrar, poderia
+  # também desfazer as próprias proteções.
+  migrate:
+    image: postgres:16-alpine
+    depends_on:
+      postgres: {condition: service_healthy}
+    volumes:
+      - ./internal/adapter/postgres/migrations:/migrations:ro
+    environment:
+      PGPASSWORD: dev
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        psql -h postgres -U wallet -d wallet -v ON_ERROR_STOP=1 -q -f /migrations/000001_init.up.sql
+        echo "migrations aplicadas"
+
+  app-1: &app
+    build: .
+    depends_on:
+      postgres: {condition: service_healthy}
+      localstack: {condition: service_healthy}
+      keycloak: {condition: service_healthy}
+      migrate: {condition: service_completed_successfully}
+    environment: &app-env
+      APP_ENV: development
+      HTTP_ADDR: ":8080"
+      LOG_LEVEL: info
+      DATABASE_URL: postgres://wallet_service:dev@postgres:5432/wallet?sslmode=disable
+      AWS_REGION: us-east-1
+      SQS_ENDPOINT: http://localstack:4566
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      SQS_SENDER_PROVIDERS: 000000000000=*
+      OIDC_ISSUER_URL: http://keycloak:8080/realms/wallet
+      OIDC_INTERNAL_SCOPE: wallets:write
+    ports: ["8080:8080"]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/health/ready >/dev/null || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  app-2:
+    <<: *app
+    environment: *app-env
+    ports: ["8082:8080"]
+
+  app-3:
+    <<: *app
+    environment: *app-env
+    ports: ["8083:8080"]
