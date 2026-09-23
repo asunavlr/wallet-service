@@ -29,7 +29,7 @@ func servicos(pool *pgxpool.Pool) (*app.WalletService, *app.WagerService) {
 	uow := postgres.NewUnitOfWork(pool)
 	clock, ids, m := app.SystemClock{}, app.UUIDGenerator{}, app.NoMetrics{}
 	politica := app.PendingPolicy{BaseDelay: time.Second, MaxDelay: time.Minute, MaxAttempts: 5}
-	return app.NewWalletService(uow, clock, ids, m), app.NewWagerService(uow, clock, ids, m, politica, 5)
+	return app.NewWalletService(uow, clock, ids, m, nil), app.NewWagerService(uow, clock, ids, m, nil, politica, 5)
 }
 
 func abrir(t *testing.T, ws *app.WalletService, saldo string) uuid.UUID {

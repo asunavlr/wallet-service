@@ -28,7 +28,7 @@ func (r *relogioFalso) Avancar(d time.Duration) { r.t = r.t.Add(d) }
 func servicosCom(pool *pgxpool.Pool, clock app.Clock, p app.PendingPolicy) (*app.WalletService, *app.WagerService) {
 	uow := postgres.NewUnitOfWork(pool)
 	ids, m := app.UUIDGenerator{}, app.NoMetrics{}
-	return app.NewWalletService(uow, clock, ids, m), app.NewWagerService(uow, clock, ids, m, p, 5)
+	return app.NewWalletService(uow, clock, ids, m, nil), app.NewWagerService(uow, clock, ids, m, nil, p, 5)
 }
 
 func operacao(walletID, playerID uuid.UUID, extID string, k wager.Kind, valor, refExt string) app.Submit {

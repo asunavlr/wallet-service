@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"log/slog"
 	"time"
 
 	"github.com/google/uuid"
@@ -50,6 +52,7 @@ type WagerService struct {
 	clock   Clock
 	ids     IDGenerator
 	metrics Metrics
+	log     *slog.Logger
 	pending PendingPolicy
 	retries int
 }
@@ -78,11 +81,46 @@ func (p PendingPolicy) Backoff(attempts int) time.Duration {
 }
 
 // NewWagerService monta o caso de uso.
-func NewWagerService(uow UnitOfWork, clock Clock, ids IDGenerator, m Metrics, p PendingPolicy, retries int) *WagerService {
+func NewWagerService(uow UnitOfWork, clock Clock, ids IDGenerator, m Metrics, log *slog.Logger, p PendingPolicy, retries int) *WagerService {
 	if retries < 1 {
 		retries = 3
 	}
-	return &WagerService{uow: uow, clock: clock, ids: ids, metrics: m, pending: p, retries: retries}
+	if log == nil {
+		log = slog.New(slog.NewTextHandler(io.Discard, nil))
+	}
+	return &WagerService{uow: uow, clock: clock, ids: ids, metrics: m, log: log, pending: p, retries: retries}
+}
+
+// registrar emite a linha de log de uma operação.
+//
+// Mora aqui, e não nos adaptadores, porque é o ponto em que HTTP e SQS
+// convergem: os identificadores que o enunciado exige para rastrear a
+// operação saem iguais pelos dois caminhos. Valor monetário NÃO é registrado
+// — o enunciado proíbe payload financeiro completo no log.
+func (s *WagerService) registrar(in Submit, r Result, err error) {
+	atributos := []slog.Attr{
+		slog.String("correlationId", in.CorrelationID),
+		slog.String("walletId", in.WalletID.String()),
+		slog.String("providerId", in.ProviderID),
+		slog.String("externalTransactionId", in.ExternalID),
+		slog.String("kind", string(in.Kind)),
+		slog.String("source", in.Source),
+	}
+	if r.TransactionID != uuid.Nil {
+		atributos = append(atributos, slog.String("transactionId", r.TransactionID.String()))
+	}
+	if err != nil {
+		atributos = append(atributos, slog.String("erro", err.Error()))
+		s.log.LogAttrs(context.Background(), slog.LevelWarn, "operação não concluída", atributos...)
+		return
+	}
+	atributos = append(atributos,
+		slog.String("status", string(r.Status)),
+		slog.Bool("idempotentReplay", r.Replay))
+	if r.FailureCode != "" {
+		atributos = append(atributos, slog.String("failureCode", string(r.FailureCode)))
+	}
+	s.log.LogAttrs(context.Background(), slog.LevelInfo, "operação processada", atributos...)
 }
 
 // Submit processa uma operação, com idempotência persistente.
@@ -107,6 +145,7 @@ func (s *WagerService) Submit(ctx context.Context, in Submit) (Result, error) {
 			s.metrics.Duplicate(in.Source)
 		}
 	}
+	s.registrar(in, res, err)
 	return res, err
 }
 

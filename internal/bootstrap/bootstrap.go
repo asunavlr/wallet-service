@@ -167,8 +167,8 @@ var modAutenticacao = fx.Module("autenticacao",
 var modCasosDeUso = fx.Module("casos-de-uso",
 	fx.Provide(
 		app.NewWalletService,
-		func(uow app.UnitOfWork, c app.Clock, ids app.IDGenerator, m app.Metrics, cfg config.Config) *app.WagerService {
-			return app.NewWagerService(uow, c, ids, m, app.PendingPolicy{
+		func(uow app.UnitOfWork, c app.Clock, ids app.IDGenerator, m app.Metrics, log *slog.Logger, cfg config.Config) *app.WagerService {
+			return app.NewWagerService(uow, c, ids, m, log, app.PendingPolicy{
 				BaseDelay: cfg.PendingBaseDelay, MaxDelay: cfg.PendingMaxDelay,
 				MaxAttempts: cfg.PendingMaxAttempts,
 			}, cfg.ConflictRetries)

@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"log/slog"
 
 	"github.com/google/uuid"
 
@@ -19,10 +21,14 @@ type WalletService struct {
 	clock   Clock
 	ids     IDGenerator
 	metrics Metrics
+	log     *slog.Logger
 }
 
-func NewWalletService(uow UnitOfWork, clock Clock, ids IDGenerator, m Metrics) *WalletService {
-	return &WalletService{uow: uow, clock: clock, ids: ids, metrics: m}
+func NewWalletService(uow UnitOfWork, clock Clock, ids IDGenerator, m Metrics, log *slog.Logger) *WalletService {
+	if log == nil {
+		log = slog.New(slog.NewTextHandler(io.Discard, nil))
+	}
+	return &WalletService{uow: uow, clock: clock, ids: ids, metrics: m, log: log}
 }
 
 // OpenWallet é o pedido de abertura.
@@ -159,7 +165,17 @@ func (s *WalletService) Reconcile(ctx context.Context, walletID uuid.UUID) (Reco
 		return Reconciliation{}, err
 	}
 	if !out.Consistent {
+		// O enunciado pede a divergência reportada em TRÊS lugares: na
+		// resposta, no log e numa métrica. A resposta é o retorno; a métrica
+		// dispara o alarme; o log é o que permite investigar qual carteira,
+		// quando, e de quanto foi a diferença.
 		s.metrics.ReconciliationDivergence()
+		s.log.LogAttrs(ctx, slog.LevelError, "divergência de reconciliação",
+			slog.String("walletId", walletID.String()),
+			slog.String("storedBalance", out.Stored.String()),
+			slog.String("calculatedBalance", out.Calculated.String()),
+			slog.String("difference", out.Difference.String()),
+			slog.Int("checkedEntries", out.CheckedEntries))
 	}
 	return out, nil
 }
