@@ -111,6 +111,23 @@ func (s *WagerService) Submit(ctx context.Context, in Submit) (Result, error) {
 }
 
 func (s *WagerService) submitOnce(ctx context.Context, in Submit) (Result, error) {
+	var out Result
+	err := s.uow.Do(ctx, func(ctx context.Context, r *Repos) error {
+		res, err := s.SubmitInTx(ctx, r, in)
+		out = res
+		return err
+	})
+	return out, err
+}
+
+// SubmitInTx processa a operação DENTRO de uma transação já aberta.
+//
+// Existe para o consumidor do SQS: lá, o registro na inbox e o tratamento da
+// operação precisam compartilhar a mesma transação SQL das mudanças de
+// domínio, do ledger e dos eventos — é isso que torna a reentrega depois de
+// uma queda entre o commit e o DeleteMessage inofensiva. Pelo HTTP, quem abre
+// a transação é o próprio submitOnce.
+func (s *WagerService) SubmitInTx(ctx context.Context, r *Repos, in Submit) (Result, error) {
 	hash := wager.Fingerprint(wager.FingerprintInput{
 		ProviderID:     in.ProviderID,
 		ExternalID:     in.ExternalID,
@@ -123,95 +140,89 @@ func (s *WagerService) submitOnce(ctx context.Context, in Submit) (Result, error
 		ReferenceExtID: in.ReferenceExtID,
 	})
 
-	var out Result
-	err := s.uow.Do(ctx, func(ctx context.Context, r *Repos) error {
-		// 1. Trava a carteira ANTES de consultar idempotência.
-		//
-		// A ordem importa: travando primeiro, a busca de idempotência enxerga
-		// tudo que outra instância já commitou para esta carteira. Consultar
-		// antes de travar abriria uma janela entre "não achei" e "vou criar".
-		w, err := r.Wallets.Lock(ctx, in.WalletID)
-		if err != nil {
-			if errors.Is(err, ErrNotFound) {
-				return fmt.Errorf("%w: carteira %s", ErrNotFound, in.WalletID)
+	// 1. Trava a carteira ANTES de consultar idempotência.
+	//
+	// A ordem importa: travando primeiro, a busca de idempotência enxerga
+	// tudo que outra instância já commitou para esta carteira. Consultar
+	// antes de travar abriria uma janela entre "não achei" e "vou criar".
+	w, err := r.Wallets.Lock(ctx, in.WalletID)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return Result{}, fmt.Errorf("%w: carteira %s", ErrNotFound, in.WalletID)
+		}
+		return Result{}, err
+	}
+	if w.PlayerID() != in.PlayerID {
+		return Result{}, fmt.Errorf("%w: carteira não pertence ao jogador informado", ErrInvalidInput)
+	}
+
+	// 2. Replay ou conflito de chave.
+	if achada, err := r.Transactions.ByIdempotencyKey(ctx, in.ProviderID, in.IdempotencyKey); err == nil {
+		if achada.PayloadHash() != hash {
+			return Result{}, ErrIdempotencyConflict
+		}
+		return resultado(achada, true), nil
+	} else if !errors.Is(err, ErrNotFound) {
+		return Result{}, err
+	}
+
+	// 3. Mesma operação financeira chegando com outra chave.
+	if _, err := r.Transactions.ByExternalID(ctx, in.ProviderID, in.ExternalID); err == nil {
+		return Result{}, ErrDuplicateExternalTransaction
+	} else if !errors.Is(err, ErrNotFound) {
+		return Result{}, err
+	}
+
+	// 4. Resolve a referência, quando declarada.
+	var ref *wager.Reference
+	var refID *uuid.UUID
+	if in.ReferenceExtID != "" {
+		achada, err := r.Transactions.ByExternalID(ctx, in.ProviderID, in.ReferenceExtID)
+		switch {
+		case err == nil:
+			revertida, err := r.Transactions.HasSuccessfulReversal(ctx, achada.ID())
+			if err != nil {
+				return Result{}, err
 			}
-			return err
-		}
-		if w.PlayerID() != in.PlayerID {
-			return fmt.Errorf("%w: carteira não pertence ao jogador informado", ErrInvalidInput)
-		}
-
-		// 2. Replay ou conflito de chave.
-		if achada, err := r.Transactions.ByIdempotencyKey(ctx, in.ProviderID, in.IdempotencyKey); err == nil {
-			if achada.PayloadHash() != hash {
-				return ErrIdempotencyConflict
-			}
-			out = resultado(achada, true)
-			return nil
-		} else if !errors.Is(err, ErrNotFound) {
-			return err
-		}
-
-		// 3. Mesma operação financeira chegando com outra chave.
-		if _, err := r.Transactions.ByExternalID(ctx, in.ProviderID, in.ExternalID); err == nil {
-			return ErrDuplicateExternalTransaction
-		} else if !errors.Is(err, ErrNotFound) {
-			return err
-		}
-
-		// 4. Resolve a referência, quando declarada.
-		var ref *wager.Reference
-		var refID *uuid.UUID
-		if in.ReferenceExtID != "" {
-			achada, err := r.Transactions.ByExternalID(ctx, in.ProviderID, in.ReferenceExtID)
-			switch {
-			case err == nil:
-				revertida, err := r.Transactions.HasSuccessfulReversal(ctx, achada.ID())
-				if err != nil {
-					return err
+			if d, ok := coerente(achada, in); !ok {
+				ref = d
+			} else {
+				ref = &wager.Reference{
+					Kind: achada.Kind(), Status: achada.Status(), Amount: achada.Amount(),
+					RoundID: achada.RoundID(), Provider: achada.ProviderID(),
+					PlayerID: achada.PlayerID().String(), WalletID: achada.WalletID().String(),
+					Reversed: revertida,
 				}
-				if d, ok := coerente(achada, in); !ok {
-					ref = d
-				} else {
-					ref = &wager.Reference{
-						Kind: achada.Kind(), Status: achada.Status(), Amount: achada.Amount(),
-						RoundID: achada.RoundID(), Provider: achada.ProviderID(),
-						PlayerID: achada.PlayerID().String(), WalletID: achada.WalletID().String(),
-						Reversed: revertida,
-					}
-				}
-				id := achada.ID()
-				refID = &id
-			case errors.Is(err, ErrNotFound):
-				ref = nil // ainda não chegou
-			default:
-				return err
 			}
+			id := achada.ID()
+			refID = &id
+		case errors.Is(err, ErrNotFound):
+			ref = nil // ainda não chegou
+		default:
+			return Result{}, err
 		}
+	}
 
-		// 5. Cria a transação e decide.
-		tx, err := wager.NewExternal(wager.ExternalInput{
-			ID: s.ids.New(), ProviderID: in.ProviderID, ExternalID: in.ExternalID,
-			IdempotencyKey: in.IdempotencyKey, PayloadHash: hash,
-			PlayerID: in.PlayerID, WalletID: in.WalletID,
-			RoundID: in.RoundID, GameID: in.GameID, Kind: in.Kind, Amount: in.Money,
-			ReferenceExtID: in.ReferenceExtID, CorrelationID: in.CorrelationID,
-		}, s.clock.Now())
-		if err != nil {
-			return fmt.Errorf("%w: %s", ErrInvalidInput, err)
-		}
+	// 5. Cria a transação e decide.
+	tx, err := wager.NewExternal(wager.ExternalInput{
+		ID: s.ids.New(), ProviderID: in.ProviderID, ExternalID: in.ExternalID,
+		IdempotencyKey: in.IdempotencyKey, PayloadHash: hash,
+		PlayerID: in.PlayerID, WalletID: in.WalletID,
+		RoundID: in.RoundID, GameID: in.GameID, Kind: in.Kind, Amount: in.Money,
+		ReferenceExtID: in.ReferenceExtID, CorrelationID: in.CorrelationID,
+	}, s.clock.Now())
+	if err != nil {
+		return Result{}, fmt.Errorf("%w: %s", ErrInvalidInput, err)
+	}
 
-		decisao := wager.Decide(w, wager.Operation{
-			Kind: in.Kind, Amount: in.Money, RoundID: in.RoundID, Provider: in.ProviderID,
-		}, ref, in.ReferenceExtID != "")
+	decisao := wager.Decide(w, wager.Operation{
+		Kind: in.Kind, Amount: in.Money, RoundID: in.RoundID, Provider: in.ProviderID,
+	}, ref, in.ReferenceExtID != "")
 
-		if err := s.aplicar(ctx, r, w, tx, decisao, refID); err != nil {
-			return err
-		}
-		out = resultado(tx, false)
-		return nil
-	})
-	return out, err
+	if err := s.aplicar(ctx, r, w, tx, decisao, refID); err != nil {
+		return Result{}, err
+	}
+	return resultado(tx, false), nil
 }
 
 // coerente confere os vínculos que Decide não tem como ver, porque dependem
