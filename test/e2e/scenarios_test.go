@@ -4,6 +4,7 @@ package e2e_test
 
 import (
 	"net/http"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -40,6 +41,12 @@ func TestProvedorNaoAbreCarteira(t *testing.T) {
 	if r.Status != http.StatusForbidden {
 		t.Errorf("= %d, queria 403: %s", r.Status, r.Bruto)
 	}
+}
+
+// interno devolve o token do serviço interno, único que lê carteira.
+func interno(t *testing.T) string {
+	t.Helper()
+	return token(t, "internal-wallet-service", "internal-secret")
 }
 
 // abrirCarteira usa o cliente interno, como o sistema faria.
@@ -112,14 +119,14 @@ func TestDuasApostasEmInstanciasDiferentes(t *testing.T) {
 	}
 
 	// Saldo final 20.00, lido de uma TERCEIRA instância.
-	leitura := chamar(t, bases[len(bases)-1], http.MethodGet, "/wallets/"+walletID, tokA, nil, nil)
+	leitura := chamar(t, bases[len(bases)-1], http.MethodGet, "/wallets/"+walletID, interno(t), nil, nil)
 	saldo := leitura.Corpo["balance"].(map[string]any)
 	if saldo["amount"] != "20.00" {
 		t.Errorf("saldo = %v, queria 20.00", saldo["amount"])
 	}
 
 	// Um único débito, e a reconciliação fecha.
-	rec := chamar(t, bases[0], http.MethodPost, "/wallets/"+walletID+"/reconciliation", tokA, nil, nil)
+	rec := chamar(t, bases[0], http.MethodPost, "/wallets/"+walletID+"/reconciliation", interno(t), nil, nil)
 	if rec.Corpo["consistent"] != true {
 		t.Errorf("reconciliação = %s", rec.Bruto)
 	}
@@ -221,13 +228,65 @@ func TestEventosSaemDepoisDoCommit(t *testing.T) {
 
 	// O ledger precisa refletir a operação, e a reconciliação fechar.
 	esperar(t, func() bool {
-		rec := chamar(t, base, http.MethodPost, "/wallets/"+walletID+"/reconciliation", tokA, nil, nil)
+		rec := chamar(t, base, http.MethodPost, "/wallets/"+walletID+"/reconciliation", interno(t), nil, nil)
 		return rec.Corpo["consistent"] == true
 	}, 10*time.Second, "reconciliação consistente")
 
-	ledger := chamar(t, base, http.MethodGet, "/wallets/"+walletID+"/ledger?limit=10", tokA, nil, nil)
+	ledger := chamar(t, base, http.MethodGet, "/wallets/"+walletID+"/ledger?limit=10", interno(t), nil, nil)
 	itens, _ := ledger.Corpo["items"].([]any)
 	if len(itens) != 2 { // abertura + aposta
 		t.Errorf("lançamentos = %d, queria 2: %s", len(itens), ledger.Bruto)
+	}
+}
+
+// Um provedor não navega em carteira alheia. O ledger de uma carteira traz as
+// operações de TODOS os provedores que a movimentaram, com valor e
+// identificador: aberto, mostraria a um provedor quanto o jogador apostou no
+// concorrente.
+func TestProvedorNaoNavegaEmCarteira(t *testing.T) {
+	base := instancias()[0]
+	walletID, player := abrirCarteira(t, base, "5000.00")
+	sfx := sufixo()
+	tokA := token(t, "provider-a", "provider-a-secret")
+	tokB := token(t, "provider-b", "provider-b-secret")
+
+	// provider-a opera na carteira
+	if r := apostar(t, base, tokA, walletID, player, "sig-"+sfx, "777.00"); r.Status != http.StatusOK {
+		t.Fatalf("aposta = %d: %s", r.Status, r.Bruto)
+	}
+
+	// nem o próprio provider-a, nem o provider-b, navegam na carteira
+	for nome, tok := range map[string]string{"provider-a (operou)": tokA, "provider-b (nunca operou)": tokB} {
+		t.Run(nome, func(t *testing.T) {
+			for _, rota := range []struct{ metodo, caminho string }{
+				{http.MethodGet, "/wallets/" + walletID},
+				{http.MethodGet, "/wallets/" + walletID + "/ledger?limit=10"},
+				{http.MethodPost, "/wallets/" + walletID + "/reconciliation"},
+			} {
+				r := chamar(t, base, rota.metodo, rota.caminho, tok, nil, nil)
+				if r.Status != http.StatusForbidden {
+					t.Errorf("%s %s = %d, queria 403: %s", rota.metodo, rota.caminho, r.Status, r.Bruto)
+				}
+				// e nada do conteúdo financeiro vaza no corpo do erro
+				if strings.Contains(r.Bruto, "777.00") || strings.Contains(r.Bruto, "5000.00") {
+					t.Errorf("valor financeiro vazou na resposta de erro: %s", r.Bruto)
+				}
+			}
+		})
+	}
+
+	// o serviço interno continua lendo normalmente
+	r := chamar(t, base, http.MethodGet, "/wallets/"+walletID, interno(t), nil, nil)
+	if r.Status != http.StatusOK {
+		t.Errorf("serviço interno = %d, queria 200", r.Status)
+	}
+
+	// e o provedor continua vendo o saldo das PRÓPRIAS operações, no replay
+	replay := apostar(t, base, tokA, walletID, player, "sig-"+sfx, "777.00")
+	if replay.Corpo["idempotentReplay"] != true {
+		t.Errorf("replay = %s", replay.Bruto)
+	}
+	if replay.Corpo["balance"].(map[string]any)["amount"] != "4223.00" {
+		t.Errorf("o provedor deveria ver o saldo da própria operação: %s", replay.Bruto)
 	}
 }

@@ -489,7 +489,18 @@ forjar um token.
 | Client | Claim | Pode |
 |---|---|---|
 | `provider-a`, `provider-b` | `provider_id` | operar e consultar **apenas as próprias** transações |
-| `internal-wallet-service` | `scope: wallets:write` | abrir carteira; operar por qualquer provedor |
+| `internal-wallet-service` | `scope: wallets:write` | tudo que é carteira; operar por qualquer provedor |
+
+**Toda rota de carteira é interna, e não só a abertura.** A seção de
+autorização do enunciado diz que "operações de carteira são restritas ao
+serviço interno", e ler é uma delas. O motivo é concreto: uma carteira pode
+ser movimentada por vários provedores, e o ledger traz valor e identificador
+das operações de todos. Com a leitura aberta, `provider-b` via quanto o
+jogador apostou em `provider-a` — que é o "acesso não autorizado a operações"
+tratado como eliminatório.
+
+O provedor não perde nada de que precise: o saldo resultante das PRÓPRIAS
+operações vem na resposta de cada uma, e no replay.
 
 **A identidade autenticada determina o `providerId`.** O campo do corpo é
 apenas conferido contra o claim; divergência é 403. Isso vale nas escritas, nas

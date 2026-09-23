@@ -3,8 +3,10 @@
 package e2e_test
 
 import (
+	"fmt"
 	"net/http"
 	"os/exec"
+	"sync"
 	"testing"
 	"time"
 )
@@ -129,11 +131,11 @@ func TestEstadoSobreviveAoReinicioCompleto(t *testing.T) {
 	}, 60*time.Second, "pendência retomada depois do reinício")
 
 	// 6. E a consistência financeira: 100 - 30 - 30 + 30 = 70.
-	w := chamar(t, base, http.MethodGet, "/wallets/"+walletID, novoTok, nil, nil)
+	w := chamar(t, base, http.MethodGet, "/wallets/"+walletID, interno(t), nil, nil)
 	if s := w.Corpo["balance"].(map[string]any); s["amount"] != "70.00" {
 		t.Errorf("saldo final = %v, queria 70.00", s["amount"])
 	}
-	rec := chamar(t, base, http.MethodPost, "/wallets/"+walletID+"/reconciliation", novoTok, nil, nil)
+	rec := chamar(t, base, http.MethodPost, "/wallets/"+walletID+"/reconciliation", interno(t), nil, nil)
 	if rec.Corpo["consistent"] != true {
 		t.Errorf("reconciliação após reinício = %s", rec.Bruto)
 	}
@@ -189,12 +191,113 @@ func TestQuedaDeUmaInstanciaNaoPerdeOperacao(t *testing.T) {
 		t.Error("o replay deveria devolver a transação original")
 	}
 
-	w := chamar(t, bases[2], http.MethodGet, "/wallets/"+walletID, tokA, nil, nil)
+	w := chamar(t, bases[2], http.MethodGet, "/wallets/"+walletID, interno(t), nil, nil)
 	if s := w.Corpo["balance"].(map[string]any); s["amount"] != "50.00" {
 		t.Errorf("saldo = %v, queria 50.00", s["amount"])
 	}
-	rec := chamar(t, bases[1], http.MethodPost, "/wallets/"+walletID+"/reconciliation", tokA, nil, nil)
+	rec := chamar(t, bases[1], http.MethodPost, "/wallets/"+walletID+"/reconciliation", interno(t), nil, nil)
 	if rec.Corpo["consistent"] != true {
 		t.Errorf("reconciliação = %s", rec.Bruto)
+	}
+}
+
+// SIGTERM com trabalho em voo: o enunciado pede que o encerramento
+// interrompa novas entradas e conclua o que está em andamento dentro do
+// prazo — sem perder nem duplicar operação.
+//
+// O teste manda apostas sem parar contra uma instância enquanto ela recebe
+// SIGTERM. Toda requisição precisa terminar de um jeito definido: concluída,
+// recusada por regra, ou recusada por indisponibilidade. O que NÃO pode é
+// uma resposta de sucesso sem o dinheiro ter se movido, ou o contrário.
+func TestSigtermComTrabalhoEmVoo(t *testing.T) {
+	if testing.Short() {
+		t.Skip("derruba um container; pulado no modo curto")
+	}
+	if !composeDisponivel(t) {
+		return
+	}
+	bases := instancias()
+	tokA := token(t, "provider-a", "provider-a-secret")
+	walletID, player := abrirCarteira(t, bases[0], "10000.00")
+	sfx := sufixo()
+
+	type envio struct {
+		ext    string
+		status int
+		corpo  map[string]any
+	}
+	var mu sync.Mutex
+	var envios []envio
+	parar := make(chan struct{})
+	var wg sync.WaitGroup
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; ; i++ {
+			select {
+			case <-parar:
+				return
+			default:
+			}
+			ext := fmt.Sprintf("term-%s-%d", sfx, i)
+			r := chamarSemPular(bases[0], http.MethodPost, "/wagering/transactions", tokA, map[string]any{
+				"providerId": "provider-a", "externalTransactionId": ext,
+				"playerId": player, "walletId": walletID,
+				"roundId": "round-1", "gameId": "fortune-chimp",
+				"kind": "BET", "money": dinheiro("1.00"),
+			}, map[string]string{"Idempotency-Key": "provider-a:" + ext})
+			mu.Lock()
+			envios = append(envios, envio{ext: ext, status: r.Status, corpo: r.Corpo})
+			mu.Unlock()
+			time.Sleep(15 * time.Millisecond)
+		}
+	}()
+
+	time.Sleep(400 * time.Millisecond)
+	t.Log("enviando SIGTERM com requisições em voo")
+	compose(t, "stop", "-t", "20", "app-1")
+	time.Sleep(300 * time.Millisecond)
+	close(parar)
+	wg.Wait()
+
+	compose(t, "start", "app-1")
+	esperarSaudavel(t, bases[0], 90*time.Second)
+
+	// Cada envio precisa estar coerente com o que o banco registrou.
+	tokDepois := token(t, "provider-a", "provider-a-secret")
+	var ok, recusadas, indisponiveis, semResposta int
+	for _, e := range envios {
+		consulta := chamar(t, bases[1%len(bases)], http.MethodGet,
+			"/providers/provider-a/wagering/transactions/"+e.ext, tokDepois, nil, nil)
+		gravada := consulta.Status == http.StatusOK
+
+		switch {
+		case e.status == http.StatusOK:
+			ok++
+			if !gravada {
+				t.Errorf("%s: respondeu 200 mas NÃO foi gravada", e.ext)
+			}
+		case e.status == http.StatusUnprocessableEntity:
+			recusadas++
+		case e.status == http.StatusServiceUnavailable, e.status == 0:
+			// Recusa honesta ou conexão cortada: o cliente reenvia com a
+			// mesma chave. Gravada ou não, as duas são aceitáveis — o que
+			// importa é que não houve sucesso mentido.
+			indisponiveis++
+		default:
+			semResposta++
+			t.Errorf("%s: status inesperado %d durante o encerramento", e.ext, e.status)
+		}
+	}
+	t.Logf("%d envios: %d concluídos, %d recusados, %d indisponíveis", len(envios), ok, recusadas, indisponiveis)
+	if ok == 0 {
+		t.Error("nenhuma operação concluiu: o teste não exercitou o encerramento")
+	}
+
+	// E o invariante que resume tudo: o ledger bate com o saldo.
+	rec := chamar(t, bases[0], http.MethodPost, "/wallets/"+walletID+"/reconciliation", interno(t), nil, nil)
+	if rec.Corpo["consistent"] != true {
+		t.Errorf("reconciliação após o encerramento = %s", rec.Bruto)
 	}
 }

@@ -107,6 +107,38 @@ func chamar(t *testing.T, base, metodo, caminho, tok string, corpo any, headers 
 	return resposta{Status: resp.StatusCode, Corpo: m, Bruto: string(bruto)}
 }
 
+// chamarSemPular é chamar() que NÃO pula o teste quando a conexão falha: um
+// erro de rede durante um encerramento é justamente o que se quer observar.
+func chamarSemPular(base, metodo, caminho, tok string, corpo any, headers map[string]string) resposta {
+	var leitor io.Reader
+	if corpo != nil {
+		b, _ := json.Marshal(corpo)
+		leitor = bytes.NewReader(b)
+	}
+	req, err := http.NewRequestWithContext(context.Background(), metodo, base+caminho, leitor)
+	if err != nil {
+		return resposta{}
+	}
+	if tok != "" {
+		req.Header.Set("Authorization", "Bearer "+tok)
+	}
+	if corpo != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+	resp, err := cliente.Do(req)
+	if err != nil {
+		return resposta{} // Status 0: conexão recusada ou cortada
+	}
+	defer resp.Body.Close()
+	bruto, _ := io.ReadAll(resp.Body)
+	var m map[string]any
+	_ = json.Unmarshal(bruto, &m)
+	return resposta{Status: resp.StatusCode, Corpo: m, Bruto: string(bruto)}
+}
+
 func dinheiro(v string) map[string]string {
 	return map[string]string{"amount": v, "currency": "BRL"}
 }

@@ -106,7 +106,12 @@ TOKEN=$(curl -s -X POST \
 contra o claim `provider_id` do token; divergência é 403. Um provedor não lê
 nem escreve nada de outro, inclusive em replay.
 
-Abrir carteira exige o escopo `wallets:write`, que só o cliente interno tem.
+**Toda rota de carteira exige o escopo `wallets:write`**, que só o cliente
+interno tem — inclusive as de leitura. Uma carteira pode ser movimentada por
+vários provedores, e o ledger traz valor e identificador das operações de
+todos: aberto, mostraria a um provedor quanto o jogador apostou no
+concorrente. O provedor continua vendo o saldo das próprias operações, que
+vem na resposta de cada uma.
 
 ---
 
@@ -188,9 +193,9 @@ curl -X POST http://localhost:8080/wallets/$WALLET/reconciliation \
 | Método | Rota | Acesso |
 |---|---|---|
 | `POST` | `/wallets` | interno |
-| `GET` | `/wallets/{walletId}` | autenticado |
-| `GET` | `/wallets/{walletId}/ledger?cursor=&limit=` | autenticado |
-| `POST` | `/wallets/{walletId}/reconciliation` | autenticado |
+| `GET` | `/wallets/{walletId}` | interno |
+| `GET` | `/wallets/{walletId}/ledger?cursor=&limit=` | interno |
+| `POST` | `/wallets/{walletId}/reconciliation` | interno |
 | `POST` | `/wagering/transactions` | provedor |
 | `GET` | `/wagering/transactions/{transactionId}` | dono da transação |
 | `GET` | `/providers/{providerId}/wagering/transactions/{externalTransactionId}` | o próprio provedor |

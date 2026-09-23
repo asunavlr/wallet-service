@@ -212,3 +212,25 @@ func TestCorpoInvalido(t *testing.T) {
 		})
 	}
 }
+
+// Um provedor não navega em carteira: nem saldo, nem ledger, nem
+// reconciliação. O ledger de uma carteira contém as operações de TODOS os
+// provedores que a movimentaram, com valor e identificador — deixá-lo aberto
+// mostraria a um provedor quanto o jogador apostou no concorrente.
+func TestProvedorNaoLeCarteiraNemLedger(t *testing.T) {
+	srv := servidor(t)
+	w := uuid.NewString()
+	rotas := []struct{ metodo, caminho string }{
+		{http.MethodGet, "/wallets/" + w},
+		{http.MethodGet, "/wallets/" + w + "/ledger"},
+		{http.MethodPost, "/wallets/" + w + "/reconciliation"},
+	}
+	for _, rota := range rotas {
+		t.Run(rota.caminho, func(t *testing.T) {
+			r := req(t, srv, rota.metodo, rota.caminho, "token-a", "", nil)
+			if r.Code != http.StatusForbidden {
+				t.Errorf("provedor em %s = %d, queria 403", rota.caminho, r.Code)
+			}
+		})
+	}
+}

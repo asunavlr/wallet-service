@@ -93,18 +93,17 @@ func TestOperacaoPelaFila(t *testing.T) {
 	base := instancias()[0]
 	walletID, player := abrirCarteira(t, base, "100.00")
 	sfx := sufixo()
-	tokA := token(t, "provider-a", "provider-a-secret")
 
 	ext := "sqs-" + sfx
 	enviar(t, c, fila, walletID, "msg-"+ext, mensagem("msg-"+ext, walletID, player, ext, "BET", "40.00"))
 
 	esperar(t, func() bool {
-		r := chamar(t, base, http.MethodGet, "/wallets/"+walletID, tokA, nil, nil)
+		r := chamar(t, base, http.MethodGet, "/wallets/"+walletID, interno(t), nil, nil)
 		s, _ := r.Corpo["balance"].(map[string]any)
 		return s != nil && s["amount"] == "60.00"
 	}, prazoFila, "saldo 60.00 após a aposta vinda da fila")
 
-	rec := chamar(t, base, http.MethodPost, "/wallets/"+walletID+"/reconciliation", tokA, nil, nil)
+	rec := chamar(t, base, http.MethodPost, "/wallets/"+walletID+"/reconciliation", interno(t), nil, nil)
 	if rec.Corpo["consistent"] != true {
 		t.Errorf("reconciliação = %s", rec.Bruto)
 	}
@@ -133,13 +132,13 @@ func TestMesmaOperacaoPorHTTPEPorFila(t *testing.T) {
 
 	// o saldo não pode se mover de novo
 	time.Sleep(3 * time.Second)
-	w := chamar(t, base, http.MethodGet, "/wallets/"+walletID, tokA, nil, nil)
+	w := chamar(t, base, http.MethodGet, "/wallets/"+walletID, interno(t), nil, nil)
 	if s := w.Corpo["balance"].(map[string]any); s["amount"] != "75.00" {
 		t.Errorf("saldo = %v, queria 75.00 — a operação foi aplicada duas vezes", s["amount"])
 	}
 
 	var lancamentos int
-	ledger := chamar(t, base, http.MethodGet, "/wallets/"+walletID+"/ledger?limit=50", tokA, nil, nil)
+	ledger := chamar(t, base, http.MethodGet, "/wallets/"+walletID+"/ledger?limit=50", interno(t), nil, nil)
 	if itens, ok := ledger.Corpo["items"].([]any); ok {
 		lancamentos = len(itens)
 	}
@@ -155,7 +154,6 @@ func TestMensagemRepetidaNaoReprocessa(t *testing.T) {
 	base := instancias()[0]
 	walletID, player := abrirCarteira(t, base, "100.00")
 	sfx := sufixo()
-	tokA := token(t, "provider-a", "provider-a-secret")
 
 	ext := "rep-" + sfx
 	corpo := mensagem("msg-"+ext, walletID, player, ext, "BET", "10.00")
@@ -167,14 +165,14 @@ func TestMensagemRepetidaNaoReprocessa(t *testing.T) {
 	}
 
 	esperar(t, func() bool {
-		r := chamar(t, base, http.MethodGet, "/wallets/"+walletID, tokA, nil, nil)
+		r := chamar(t, base, http.MethodGet, "/wallets/"+walletID, interno(t), nil, nil)
 		s, _ := r.Corpo["balance"].(map[string]any)
 		return s != nil && s["amount"] == "90.00"
 	}, prazoFila, "saldo 90.00")
 
 	// e continua 90.00 depois de tudo assentar
 	time.Sleep(3 * time.Second)
-	w := chamar(t, base, http.MethodGet, "/wallets/"+walletID, tokA, nil, nil)
+	w := chamar(t, base, http.MethodGet, "/wallets/"+walletID, interno(t), nil, nil)
 	if s := w.Corpo["balance"].(map[string]any); s["amount"] != "90.00" {
 		t.Errorf("saldo = %v, queria 90.00 — houve movimentação duplicada", s["amount"])
 	}
@@ -188,7 +186,6 @@ func TestOpeningPelaFilaVaiParaDLQ(t *testing.T) {
 	base := instancias()[0]
 	walletID, player := abrirCarteira(t, base, "100.00")
 	sfx := sufixo()
-	tokA := token(t, "provider-a", "provider-a-secret")
 
 	ext := "op-" + sfx
 	enviar(t, c, fila, walletID, "msg-"+ext, mensagem("msg-"+ext, walletID, player, ext, "OPENING", "50.00"))
@@ -217,7 +214,7 @@ func TestOpeningPelaFilaVaiParaDLQ(t *testing.T) {
 		t.Error("a mensagem com OPENING não chegou à DLQ")
 	}
 
-	w := chamar(t, base, http.MethodGet, "/wallets/"+walletID, tokA, nil, nil)
+	w := chamar(t, base, http.MethodGet, "/wallets/"+walletID, interno(t), nil, nil)
 	if s := w.Corpo["balance"].(map[string]any); s["amount"] != "100.00" {
 		t.Errorf("saldo = %v, queria 100.00 — OPENING externo foi aplicado", s["amount"])
 	}

@@ -52,12 +52,25 @@ func Router(h *Handlers, a Autenticador, saude Health, log *slog.Logger, metrica
 	r.Group(func(r chi.Router) {
 		r.Use(Autenticar(a))
 
-		// Abrir carteira é operação interna: provedor de jogos não abre conta.
-		r.With(SomenteInterno).Post("/wallets", h.AbrirCarteira)
-
-		r.Get("/wallets/{walletId}", h.LerCarteira)
-		r.Get("/wallets/{walletId}/ledger", h.LerLedger)
-		r.Post("/wallets/{walletId}/reconciliation", h.Reconciliar)
+		// TODA operação de carteira é interna, e não só a abertura.
+		//
+		// O enunciado diz, na seção de autorização, que "operações de
+		// carteira são restritas ao serviço interno". Ler é uma delas: uma
+		// carteira pode ser movimentada por vários provedores, e o ledger
+		// expõe valor e identificador das operações de todos eles. Deixar a
+		// leitura aberta permitia a um provedor ver quanto o jogador apostou
+		// no concorrente — que é exatamente o "acesso não autorizado a
+		// operações" que o enunciado trata como eliminatório.
+		//
+		// O provedor continua vendo o saldo que as PRÓPRIAS operações
+		// produziram: ele vem na resposta de cada operação e no replay.
+		r.Group(func(r chi.Router) {
+			r.Use(SomenteInterno)
+			r.Post("/wallets", h.AbrirCarteira)
+			r.Get("/wallets/{walletId}", h.LerCarteira)
+			r.Get("/wallets/{walletId}/ledger", h.LerLedger)
+			r.Post("/wallets/{walletId}/reconciliation", h.Reconciliar)
+		})
 
 		r.Post("/wagering/transactions", h.EnviarOperacao)
 		r.Get("/wagering/transactions/{transactionId}", h.LerOperacao)

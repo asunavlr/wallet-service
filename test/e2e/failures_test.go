@@ -45,11 +45,11 @@ func TestReversaoAntesDaReferenciaPontaAPonta(t *testing.T) {
 	}, 30*1000*1000*1000, "REFUND resolvido pelo worker")
 
 	// saldo de volta aos 100.00 e reconciliação fechando
-	w := chamar(t, base, http.MethodGet, "/wallets/"+walletID, tokA, nil, nil)
+	w := chamar(t, base, http.MethodGet, "/wallets/"+walletID, interno(t), nil, nil)
 	if s := w.Corpo["balance"].(map[string]any); s["amount"] != "100.00" {
 		t.Errorf("saldo = %v, queria 100.00", s["amount"])
 	}
-	rec := chamar(t, base, http.MethodPost, "/wallets/"+walletID+"/reconciliation", tokA, nil, nil)
+	rec := chamar(t, base, http.MethodPost, "/wallets/"+walletID+"/reconciliation", interno(t), nil, nil)
 	if rec.Corpo["consistent"] != true {
 		t.Errorf("reconciliação = %s", rec.Bruto)
 	}
@@ -62,7 +62,7 @@ func TestLossPontaAPonta(t *testing.T) {
 	sfx := sufixo()
 	tokA := token(t, "provider-a", "provider-a-secret")
 
-	antes := chamar(t, base, http.MethodGet, "/wallets/"+walletID, tokA, nil, nil)
+	antes := chamar(t, base, http.MethodGet, "/wallets/"+walletID, interno(t), nil, nil)
 	versaoAntes := antes.Corpo["version"]
 
 	r := chamar(t, base, http.MethodPost, "/wagering/transactions", tokA, map[string]any{
@@ -76,7 +76,7 @@ func TestLossPontaAPonta(t *testing.T) {
 		t.Fatalf("LOSS = %d/%v: %s", r.Status, r.Corpo["status"], r.Bruto)
 	}
 
-	depois := chamar(t, base, http.MethodGet, "/wallets/"+walletID, tokA, nil, nil)
+	depois := chamar(t, base, http.MethodGet, "/wallets/"+walletID, interno(t), nil, nil)
 	if depois.Corpo["version"] != versaoAntes {
 		t.Errorf("versão mudou de %v para %v; LOSS não versiona", versaoAntes, depois.Corpo["version"])
 	}
@@ -144,7 +144,7 @@ func TestConflitosPelaAPI(t *testing.T) {
 	}
 
 	// nada disso moveu o saldo além da primeira aposta
-	w := chamar(t, base, http.MethodGet, "/wallets/"+walletID, tokA, nil, nil)
+	w := chamar(t, base, http.MethodGet, "/wallets/"+walletID, interno(t), nil, nil)
 	if s := w.Corpo["balance"].(map[string]any); s["amount"] != "475.00" {
 		t.Errorf("saldo = %v, queria 475.00", s["amount"])
 	}
@@ -185,7 +185,7 @@ func TestPaginacaoDoLedger(t *testing.T) {
 		}
 	}
 
-	primeira := chamar(t, base, http.MethodGet, "/wallets/"+walletID+"/ledger?limit=2", tokA, nil, nil)
+	primeira := chamar(t, base, http.MethodGet, "/wallets/"+walletID+"/ledger?limit=2", interno(t), nil, nil)
 	itens, _ := primeira.Corpo["items"].([]any)
 	if len(itens) != 2 {
 		t.Fatalf("página = %d itens, queria 2: %s", len(itens), primeira.Bruto)
@@ -196,7 +196,7 @@ func TestPaginacaoDoLedger(t *testing.T) {
 	}
 
 	segunda := chamar(t, base, http.MethodGet,
-		"/wallets/"+walletID+"/ledger?limit=2&cursor="+cursor, tokA, nil, nil)
+		"/wallets/"+walletID+"/ledger?limit=2&cursor="+cursor, interno(t), nil, nil)
 	itens2, _ := segunda.Corpo["items"].([]any)
 	if len(itens2) != 2 {
 		t.Errorf("segunda página = %d itens: %s", len(itens2), segunda.Bruto)
@@ -207,7 +207,7 @@ func TestPaginacaoDoLedger(t *testing.T) {
 	}
 
 	// cursor inválido é 400
-	ruim := chamar(t, base, http.MethodGet, "/wallets/"+walletID+"/ledger?cursor=!!!", tokA, nil, nil)
+	ruim := chamar(t, base, http.MethodGet, "/wallets/"+walletID+"/ledger?cursor=!!!", interno(t), nil, nil)
 	if ruim.Status != http.StatusBadRequest {
 		t.Errorf("cursor inválido = %d, queria 400", ruim.Status)
 	}
