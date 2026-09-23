@@ -398,3 +398,176 @@ func resultado(t *wager.Transaction, replay bool) Result {
 		FailureCode: t.FailureCode(), Replay: replay,
 	}
 }
+
+// ─── retomada de pendências ─────────────────────────────────────────────────
+
+// ResolvePending reavalia uma operação que esperava por referência.
+//
+// Mora aqui, e não no worker, porque é a MESMA decisão do fluxo síncrono: as
+// regras não podem divergir entre quem chegou na hora certa e quem chegou
+// antes da referência. O worker só empresta o laço e o agendamento.
+//
+// A ordem dos locks é a mesma do caminho HTTP — carteira primeiro —, porque
+// locks adquiridos em ordens diferentes por caminhos diferentes é como nasce
+// um deadlock.
+func (s *WagerService) ResolvePending(ctx context.Context, r *Repos, id uuid.UUID) error {
+	tx, err := r.Transactions.ByID(ctx, id)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return nil // outra instância já tratou
+		}
+		return err
+	}
+	if tx.Status().Terminal() {
+		return nil
+	}
+
+	w, err := r.Wallets.Lock(ctx, tx.WalletID())
+	if err != nil {
+		return err
+	}
+	agora := s.clock.Now()
+
+	ref, err := r.Transactions.ByExternalID(ctx, tx.ProviderID(), tx.ReferenceExtID())
+	switch {
+	case errors.Is(err, ErrNotFound):
+		// Ainda não chegou: adia, ou desiste quando o prazo se esgota.
+		return s.adiar(ctx, r, tx, agora, wager.ReferenceNotFound)
+	case err != nil:
+		return err
+	case ref.Status() == wager.PendingReference:
+		// Existe, mas ela própria ainda espera. Continua aguardando: rejeitar
+		// agora descartaria uma operação que ainda pode concluir.
+		return s.adiar(ctx, r, tx, agora, wager.ReferenceNotProcessed)
+	}
+
+	// A referência chegou a um estado terminal: decide com ela em mãos.
+	revertida, err := r.Transactions.HasSuccessfulReversal(ctx, ref.ID())
+	if err != nil {
+		return err
+	}
+	dominio := &wager.Reference{
+		Kind: ref.Kind(), Status: ref.Status(), Amount: ref.Amount(),
+		RoundID: ref.RoundID(), Provider: ref.ProviderID(),
+		PlayerID: ref.PlayerID().String(), WalletID: ref.WalletID().String(),
+		Reversed: revertida,
+	}
+	// Vínculos que Decide não enxerga porque dependem dos ids resolvidos.
+	if ref.PlayerID() != tx.PlayerID() || ref.WalletID() != tx.WalletID() {
+		dominio.RoundID = "divergente"
+	}
+
+	decisao := wager.Decide(w, wager.Operation{
+		Kind: tx.Kind(), Amount: tx.Amount(), RoundID: tx.RoundID(), Provider: tx.ProviderID(),
+	}, dominio, true)
+
+	if decisao.Action == wager.ActionAwait {
+		return s.adiar(ctx, r, tx, agora, wager.ReferenceNotProcessed)
+	}
+
+	refID := ref.ID()
+	if err := s.aplicarRetomada(ctx, r, w, tx, decisao, &refID); err != nil {
+		return err
+	}
+	s.metrics.TransactionResult(string(tx.Kind()), string(tx.Status()), "worker")
+	return nil
+}
+
+// adiar agenda a próxima tentativa ou encerra como rejeição quando o número
+// máximo de tentativas se esgota.
+func (s *WagerService) adiar(ctx context.Context, r *Repos, tx *wager.Transaction, agora time.Time, motivo wager.FailureCode) error {
+	if tx.Attempts() >= s.pending.MaxAttempts {
+		w, err := r.Wallets.ByID(ctx, tx.WalletID())
+		if err != nil {
+			return err
+		}
+		saldo := w.Balance()
+		if err := tx.Reject(motivo, &saldo, agora); err != nil {
+			return err
+		}
+		if err := r.Transactions.Save(ctx, tx); err != nil {
+			return err
+		}
+		s.metrics.TransactionResult(string(tx.Kind()), string(wager.Rejected), "worker")
+		return s.enfileirarRejeitado(ctx, r, tx)
+	}
+
+	proxima := agora.Add(s.pending.Backoff(tx.Attempts()))
+	if err := tx.AwaitReference(proxima, agora); err != nil {
+		return err
+	}
+	s.metrics.Retry("reference")
+	return r.Transactions.Save(ctx, tx)
+}
+
+// aplicarRetomada é aplicar para uma transação que JÁ EXISTE no banco: usa
+// Save em vez de Insert, e o resto é idêntico.
+func (s *WagerService) aplicarRetomada(
+	ctx context.Context, r *Repos, w *wallet.Wallet,
+	tx *wager.Transaction, d wager.Decision, refID *uuid.UUID,
+) error {
+	agora := s.clock.Now()
+
+	switch d.Action {
+	case wager.ActionReject:
+		saldo := w.Balance()
+		if err := tx.Reject(d.Code, &saldo, agora); err != nil {
+			return err
+		}
+		if err := r.Transactions.Save(ctx, tx); err != nil {
+			return err
+		}
+		return s.enfileirarRejeitado(ctx, r, tx)
+
+	case wager.ActionNoMove:
+		saldo := w.Balance()
+		if err := tx.Process(saldo, refID, agora); err != nil {
+			return err
+		}
+		if err := r.Transactions.Save(ctx, tx); err != nil {
+			return err
+		}
+		return s.enfileirarProcessado(ctx, r, tx, nil, w.Version())
+
+	case wager.ActionMove:
+		versaoAnterior := w.Version()
+		lanc, err := w.Apply(s.ids.New(), tx.ID(), d.Direction, d.Amount, agora)
+		if err != nil {
+			if errors.Is(err, wallet.ErrInsufficientFunds) {
+				saldo := w.Balance()
+				codigo := wager.InsufficientFunds
+				if tx.Kind().IsReversal() {
+					codigo = wager.ReversalInsufficientFunds
+				}
+				if err := tx.Reject(codigo, &saldo, agora); err != nil {
+					return err
+				}
+				if err := r.Transactions.Save(ctx, tx); err != nil {
+					return err
+				}
+				return s.enfileirarRejeitado(ctx, r, tx)
+			}
+			return err
+		}
+		if err := tx.Process(w.Balance(), refID, agora); err != nil {
+			return err
+		}
+		if err := r.Transactions.Save(ctx, tx); err != nil {
+			return err
+		}
+		if err := r.Wallets.UpdateBalance(ctx, w, versaoAnterior); err != nil {
+			return err
+		}
+		if err := r.Ledger.Insert(ctx, lanc); err != nil {
+			return err
+		}
+		if err := s.enfileirarProcessado(ctx, r, tx, lanc, w.Version()); err != nil {
+			return err
+		}
+		return r.Transactions.WakeWaitingFor(ctx, tx.ProviderID(), tx.ExternalID(), agora)
+	}
+	return fmt.Errorf("decisão desconhecida na retomada: %s", d.Action)
+}
+
+// PendingPolicyOf expõe a política, para que o worker use o mesmo backoff.
+func (s *WagerService) PendingPolicyOf() PendingPolicy { return s.pending }
