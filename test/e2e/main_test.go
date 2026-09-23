@@ -123,6 +123,16 @@ func esperar(t *testing.T, cond func() bool, prazo time.Duration, oque string) {
 	t.Fatalf("tempo esgotado esperando: %s", oque)
 }
 
+// sufixo gera um identificador único para os dados de um teste.
+//
+// NÃO derive isso de um pedaço do UUID da carteira: o UUIDv7 é ordenado por
+// tempo, então os primeiros dígitos são iguais para tudo que nasce no mesmo
+// instante — e ids de teste colidiriam entre execuções, fazendo a inbox
+// deduplicar corretamente uma mensagem que o teste achava ser nova.
+func sufixo() string {
+	return uuid.NewString()[24:] // os 12 dígitos finais, que são aleatórios
+}
+
 // uuidNovo gera um UUIDv7, como o serviço faz.
 func uuidNovo() string {
 	id, err := uuid.NewV7()

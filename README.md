@@ -258,6 +258,14 @@ go test -tags e2e ./test/e2e/ -v
 
 Os testes e2e usam as três instâncias e tokens reais do Keycloak.
 
+Alguns deles derrubam e reiniciam containers de propósito (os cenários de
+recuperação), e um espera até 90 s — mais que o `VisibilityTimeout` de 60 s da
+fila, porque depois de matar uma instância as mensagens que ela tinha em mãos
+só voltam a ficar visíveis quando esse prazo expira. Use `-short` para pular os
+que mexem nos containers.
+
+**Total: 103 testes unitários, 17 de integração e 20 ponta a ponta.**
+
 ### O que é verificado
 
 | Cenário | Onde |
@@ -275,6 +283,11 @@ Os testes e2e usam as três instâncias e tokens reais do Keycloak.
 | Republicação preservando o `eventId` | `test/integration` |
 | Idempotência sobrevivendo a reinício | `test/integration` |
 | Isolamento entre provedores, inclusive em replay | `test/e2e` |
+| Mesma operação por HTTP e por fila, deduplicada | `test/e2e` |
+| Mensagem repetida absorvida pela inbox | `test/e2e` |
+| `OPENING` pela fila indo direto à DLQ | `test/e2e` |
+| Reinício completo preservando idempotência e pendências | `test/e2e` |
+| Queda de uma instância sem perder operação | `test/e2e` |
 
 ---
 

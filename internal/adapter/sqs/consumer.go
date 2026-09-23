@@ -3,6 +3,7 @@ package sqs
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"time"
 
@@ -25,6 +26,7 @@ type API interface {
 	ReceiveMessage(ctx context.Context, in *sqs.ReceiveMessageInput, opts ...func(*sqs.Options)) (*sqs.ReceiveMessageOutput, error)
 	DeleteMessage(ctx context.Context, in *sqs.DeleteMessageInput, opts ...func(*sqs.Options)) (*sqs.DeleteMessageOutput, error)
 	ChangeMessageVisibility(ctx context.Context, in *sqs.ChangeMessageVisibilityInput, opts ...func(*sqs.Options)) (*sqs.ChangeMessageVisibilityOutput, error)
+	SendMessage(ctx context.Context, in *sqs.SendMessageInput, opts ...func(*sqs.Options)) (*sqs.SendMessageOutput, error)
 }
 
 // Consumer lê operações da fila.
@@ -48,6 +50,8 @@ type ConsumerConfig struct {
 	// VisibilityTimeout precisa ser maior que o p99 de processamento, senão a
 	// mensagem reaparece enquanto ainda está sendo tratada.
 	VisibilityTimeout int32
+	// DLQURL recebe as mensagens permanentemente inválidas.
+	DLQURL string
 	// SenderProviders mapeia o remetente IAM ao provedor que ele pode
 	// declarar. É o equivalente, na fila, ao providerId derivado do token.
 	SenderProviders map[string]string
@@ -139,26 +143,19 @@ func (c *Consumer) tratar(ctx context.Context, m types.Message) error {
 	if err := contract.DecodeBytes([]byte(corpo), &env); err != nil {
 		// Malformada: nada a tentar de novo. Deixar chegar à DLQ pelo
 		// maxReceiveCount é o caminho previsto pelo enunciado.
-		c.log.Error("mensagem malformada", slog.String("erro", err.Error()))
-		c.metrics.DeadLetter("sqs")
-		return nil // remove: reentregar não muda nada
+		return c.descartar(ctx, m, "", "mensagem malformada", err)
 	}
 	dados, err := env.Validate()
 	if err != nil {
-		c.log.Error("envelope inválido",
-			slog.String("messageId", env.MessageID), slog.String("erro", err.Error()))
-		c.metrics.DeadLetter("sqs")
-		return nil
+		return c.descartar(ctx, m, env.MessageID, "envelope inválido", err)
 	}
 
 	// Vínculo remetente → provedor: o equivalente, na fila, ao providerId
 	// derivado do token no HTTP. Sem isso, qualquer produtor com acesso à
 	// fila poderia operar em nome de qualquer provedor.
 	if !c.remetenteAutorizado(m, env.Data.ProviderID) {
-		c.log.Error("remetente não autorizado para o provedor",
-			slog.String("providerId", env.Data.ProviderID))
-		c.metrics.DeadLetter("sqs")
-		return nil
+		return c.descartar(ctx, m, env.MessageID, "remetente não autorizado para o provedor",
+			fmt.Errorf("providerId %q", env.Data.ProviderID))
 	}
 
 	fingerprint := wager.Fingerprint(wager.FingerprintInput{
@@ -211,20 +208,14 @@ func (c *Consumer) tratar(ctx context.Context, m types.Message) error {
 
 	switch {
 	case errors.Is(err, errConteudoDivergente):
-		c.log.Error("mesmo messageId com conteúdo diferente",
-			slog.String("messageId", env.MessageID))
-		c.metrics.DeadLetter("sqs")
-		return nil
+		return c.descartar(ctx, m, env.MessageID, "mesmo messageId com conteúdo diferente", err)
 
 	case errors.Is(err, app.ErrIdempotencyConflict),
 		errors.Is(err, app.ErrDuplicateExternalTransaction),
 		errors.Is(err, app.ErrInvalidInput),
 		errors.Is(err, contract.ErrDecode):
 		// Permanentes: reentregar dá o mesmo resultado.
-		c.log.Warn("mensagem recusada em definitivo",
-			slog.String("messageId", env.MessageID), slog.String("erro", err.Error()))
-		c.metrics.DeadLetter("sqs")
-		return nil
+		return c.descartar(ctx, m, env.MessageID, "mensagem recusada em definitivo", err)
 
 	case err != nil && app.Transient(err):
 		c.metrics.Retry("sqs")
@@ -260,6 +251,54 @@ func (c *Consumer) tratar(ctx context.Context, m types.Message) error {
 }
 
 var errConteudoDivergente = errors.New("sqs: mesmo messageId com conteúdo diferente")
+
+// descartar envia a mensagem à DLQ e a remove da fila de entrada.
+//
+// O enunciado pede que erros permanentes cheguem à DLQ. Deixar o
+// maxReceiveCount se esgotar também levaria até lá, mas só depois de cinco
+// reentregas inúteis — cada uma ocupando o consumidor e, numa fila FIFO,
+// segurando a ordem do grupo. Mover de imediato torna o destino
+// determinístico e o diagnóstico imediato.
+//
+// Falha ao publicar na DLQ NÃO remove a mensagem: melhor reentregá-la do que
+// perdê-la em silêncio.
+func (c *Consumer) descartar(ctx context.Context, m types.Message, messageID, motivo string, causa error) error {
+	c.metrics.DeadLetter("sqs")
+	c.log.Error(motivo,
+		slog.String("messageId", messageID),
+		slog.String("erro", causa.Error()))
+
+	if c.cfg.DLQURL != "" {
+		grupo := m.Attributes[string(types.MessageSystemAttributeNameMessageGroupId)]
+		if grupo == "" {
+			grupo = "invalidas"
+		}
+		dedup := messageID
+		if dedup == "" {
+			dedup = aws.ToString(m.MessageId)
+		}
+		_, err := c.api.SendMessage(ctx, &sqs.SendMessageInput{
+			QueueUrl:               aws.String(c.cfg.DLQURL),
+			MessageBody:            m.Body,
+			MessageGroupId:         aws.String(grupo),
+			MessageDeduplicationId: aws.String(dedup),
+		})
+		if err != nil {
+			c.log.Error("não foi possível mover a mensagem para a DLQ",
+				slog.String("messageId", messageID), slog.String("erro", err.Error()))
+			return err // volta para a fila; o redrive ainda a levará à DLQ
+		}
+	}
+
+	_, err := c.api.DeleteMessage(ctx, &sqs.DeleteMessageInput{
+		QueueUrl: aws.String(c.cfg.QueueURL), ReceiptHandle: m.ReceiptHandle,
+	})
+	if err != nil {
+		c.log.Warn("mensagem movida para a DLQ mas não removida da entrada",
+			slog.String("messageId", messageID), slog.String("erro", err.Error()))
+	}
+	return nil
+}
 
 // remetenteAutorizado confere o mapa remetente → provedor.
 func (c *Consumer) remetenteAutorizado(m types.Message, providerID string) bool {

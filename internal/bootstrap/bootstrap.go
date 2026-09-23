@@ -254,7 +254,7 @@ func rodarWorker(lc fx.Lifecycle, nome string, log *slog.Logger, timeout time.Du
 func novoConsumidor(lc fx.Lifecycle, api *awssqs.Client, f sqs.Filas, uow app.UnitOfWork,
 	w *app.WagerService, c app.Clock, m app.Metrics, log *slog.Logger, cfg config.Config) *sqs.Consumer {
 	cons := sqs.NewConsumer(api, uow, w, c, m, log, sqs.ConsumerConfig{
-		QueueURL: f.Entrada, SenderProviders: cfg.SQSSenderProviders,
+		QueueURL: f.Entrada, DLQURL: f.DLQ, SenderProviders: cfg.SQSSenderProviders,
 	})
 	rodarWorker(lc, "sqs-consumer", log, cfg.ShutdownTimeout, cons.Run)
 	return cons

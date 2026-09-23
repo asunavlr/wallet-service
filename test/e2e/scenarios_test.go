@@ -75,6 +75,7 @@ func TestDuasApostasEmInstanciasDiferentes(t *testing.T) {
 		t.Skip("precisa de ao menos duas instâncias")
 	}
 	walletID, player := abrirCarteira(t, bases[0], "100.00")
+	sfx := sufixo()
 	tokA := token(t, "provider-a", "provider-a-secret")
 
 	var wg sync.WaitGroup
@@ -86,7 +87,7 @@ func TestDuasApostasEmInstanciasDiferentes(t *testing.T) {
 			defer wg.Done()
 			<-partida
 			res[i] = apostar(t, bases[i%len(bases)], tokA, walletID, player,
-				"tx-"+walletID[:8]+"-"+string(rune('a'+i)), "80.00")
+				"tx-"+sfx+"-"+string(rune('a'+i)), "80.00")
 		}(i)
 	}
 	close(partida)
@@ -132,8 +133,9 @@ func TestDuasApostasEmInstanciasDiferentes(t *testing.T) {
 func TestReplayEntreInstancias(t *testing.T) {
 	bases := instancias()
 	walletID, player := abrirCarteira(t, bases[0], "100.00")
+	sfx := sufixo()
 	tokA := token(t, "provider-a", "provider-a-secret")
-	extID := "tx-replay-" + walletID[:8]
+	extID := "tx-replay-" + sfx
 
 	primeira := apostar(t, bases[0], tokA, walletID, player, extID, "10.00")
 	if primeira.Status != http.StatusOK {
@@ -167,9 +169,10 @@ func TestReplayEntreInstancias(t *testing.T) {
 func TestIsolamentoEntreProvedores(t *testing.T) {
 	base := instancias()[0]
 	walletID, player := abrirCarteira(t, base, "100.00")
+	sfx := sufixo()
 	tokA := token(t, "provider-a", "provider-a-secret")
 	tokB := token(t, "provider-b", "provider-b-secret")
-	extID := "tx-iso-" + walletID[:8]
+	extID := "tx-iso-" + sfx
 
 	feita := apostar(t, base, tokA, walletID, player, extID, "25.00")
 	if feita.Status != http.StatusOK {
@@ -208,9 +211,10 @@ func TestIsolamentoEntreProvedores(t *testing.T) {
 func TestEventosSaemDepoisDoCommit(t *testing.T) {
 	base := instancias()[0]
 	walletID, player := abrirCarteira(t, base, "100.00")
+	sfx := sufixo()
 	tokA := token(t, "provider-a", "provider-a-secret")
 
-	r := apostar(t, base, tokA, walletID, player, "tx-ev-"+walletID[:8], "15.00")
+	r := apostar(t, base, tokA, walletID, player, "tx-ev-"+sfx, "15.00")
 	if r.Status != http.StatusOK {
 		t.Fatalf("= %d: %s", r.Status, r.Bruto)
 	}

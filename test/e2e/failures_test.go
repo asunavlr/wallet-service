@@ -12,17 +12,17 @@ import (
 func TestReversaoAntesDaReferenciaPontaAPonta(t *testing.T) {
 	base := instancias()[0]
 	walletID, player := abrirCarteira(t, base, "100.00")
+	sfx := sufixo()
 	tokA := token(t, "provider-a", "provider-a-secret")
-	sufixo := walletID[:8]
 
 	// o REFUND chega primeiro
 	refund := chamar(t, base, http.MethodPost, "/wagering/transactions", tokA, map[string]any{
-		"providerId": "provider-a", "externalTransactionId": "rf-" + sufixo,
+		"providerId": "provider-a", "externalTransactionId": "rf-" + sfx,
 		"playerId": player, "walletId": walletID,
 		"roundId": "round-1", "gameId": "fortune-chimp",
 		"kind": "REFUND", "money": dinheiro("30.00"),
-		"referenceExternalTransactionId": "bt-" + sufixo,
-	}, map[string]string{"Idempotency-Key": "provider-a:rf-" + sufixo})
+		"referenceExternalTransactionId": "bt-" + sfx,
+	}, map[string]string{"Idempotency-Key": "provider-a:rf-" + sfx})
 
 	if refund.Status != http.StatusAccepted {
 		t.Fatalf("REFUND sem referência = %d, queria 202: %s", refund.Status, refund.Bruto)
@@ -32,7 +32,7 @@ func TestReversaoAntesDaReferenciaPontaAPonta(t *testing.T) {
 	}
 
 	// agora a aposta
-	bet := apostar(t, base, tokA, walletID, player, "bt-"+sufixo, "30.00")
+	bet := apostar(t, base, tokA, walletID, player, "bt-"+sfx, "30.00")
 	if bet.Status != http.StatusOK {
 		t.Fatalf("BET = %d: %s", bet.Status, bet.Bruto)
 	}
@@ -59,17 +59,18 @@ func TestReversaoAntesDaReferenciaPontaAPonta(t *testing.T) {
 func TestLossPontaAPonta(t *testing.T) {
 	base := instancias()[0]
 	walletID, player := abrirCarteira(t, base, "100.00")
+	sfx := sufixo()
 	tokA := token(t, "provider-a", "provider-a-secret")
 
 	antes := chamar(t, base, http.MethodGet, "/wallets/"+walletID, tokA, nil, nil)
 	versaoAntes := antes.Corpo["version"]
 
 	r := chamar(t, base, http.MethodPost, "/wagering/transactions", tokA, map[string]any{
-		"providerId": "provider-a", "externalTransactionId": "ls-" + walletID[:8],
+		"providerId": "provider-a", "externalTransactionId": "ls-" + sfx,
 		"playerId": player, "walletId": walletID,
 		"roundId": "round-1", "gameId": "fortune-chimp",
 		"kind": "LOSS", "money": dinheiro("0.00"),
-	}, map[string]string{"Idempotency-Key": "provider-a:ls-" + walletID[:8]})
+	}, map[string]string{"Idempotency-Key": "provider-a:ls-" + sfx})
 
 	if r.Status != http.StatusOK || r.Corpo["status"] != "PROCESSED" {
 		t.Fatalf("LOSS = %d/%v: %s", r.Status, r.Corpo["status"], r.Bruto)
@@ -88,14 +89,15 @@ func TestLossPontaAPonta(t *testing.T) {
 func TestLossComValorERecusado(t *testing.T) {
 	base := instancias()[0]
 	walletID, player := abrirCarteira(t, base, "100.00")
+	sfx := sufixo()
 	tokA := token(t, "provider-a", "provider-a-secret")
 
 	r := chamar(t, base, http.MethodPost, "/wagering/transactions", tokA, map[string]any{
-		"providerId": "provider-a", "externalTransactionId": "lsx-" + walletID[:8],
+		"providerId": "provider-a", "externalTransactionId": "lsx-" + sfx,
 		"playerId": player, "walletId": walletID,
 		"roundId": "round-1", "gameId": "fortune-chimp",
 		"kind": "LOSS", "money": dinheiro("5.00"),
-	}, map[string]string{"Idempotency-Key": "provider-a:lsx-" + walletID[:8]})
+	}, map[string]string{"Idempotency-Key": "provider-a:lsx-" + sfx})
 
 	if r.Status != http.StatusBadRequest {
 		t.Errorf("= %d, queria 400: %s", r.Status, r.Bruto)
@@ -106,8 +108,9 @@ func TestLossComValorERecusado(t *testing.T) {
 func TestConflitosPelaAPI(t *testing.T) {
 	base := instancias()[0]
 	walletID, player := abrirCarteira(t, base, "500.00")
+	sfx := sufixo()
 	tokA := token(t, "provider-a", "provider-a-secret")
-	ext := "cf-" + walletID[:8]
+	ext := "cf-" + sfx
 	chave := "provider-a:" + ext
 
 	corpo := map[string]any{
@@ -135,7 +138,7 @@ func TestConflitosPelaAPI(t *testing.T) {
 
 	// mesma operação, outra chave
 	r = chamar(t, base, http.MethodPost, "/wagering/transactions", tokA, corpo,
-		map[string]string{"Idempotency-Key": "provider-a:outra-chave-" + walletID[:8]})
+		map[string]string{"Idempotency-Key": "provider-a:outra-chave-" + sfx})
 	if r.Status != http.StatusConflict || r.Corpo["code"] != "DUPLICATE_EXTERNAL_TRANSACTION" {
 		t.Errorf("outra chave = %d/%v, queria 409/DUPLICATE_EXTERNAL_TRANSACTION", r.Status, r.Corpo["code"])
 	}
@@ -172,11 +175,12 @@ func TestSegundaCarteiraEConflito(t *testing.T) {
 func TestPaginacaoDoLedger(t *testing.T) {
 	base := instancias()[0]
 	walletID, player := abrirCarteira(t, base, "100.00")
+	sfx := sufixo()
 	tokA := token(t, "provider-a", "provider-a-secret")
 
 	for i := 0; i < 5; i++ {
 		if r := apostar(t, base, tokA, walletID, player,
-			"pg-"+walletID[:8]+"-"+string(rune('a'+i)), "1.00"); r.Status != http.StatusOK {
+			"pg-"+sfx+"-"+string(rune('a'+i)), "1.00"); r.Status != http.StatusOK {
 			t.Fatalf("aposta %d = %d: %s", i, r.Status, r.Bruto)
 		}
 	}
