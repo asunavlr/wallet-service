@@ -20,12 +20,22 @@ import (
 )
 
 // URL é a conexão com o Postgres de teste.
-// Vem de TEST_DATABASE_URL, com o padrão do `make db-up`.
+//
+// Aponta para o banco `wallet_test`, SEPARADO do `wallet` que as instâncias
+// usam. A separação não é higiene: compartilhando o banco, os relays de
+// outbox das instâncias em execução publicariam os eventos que o teste
+// acabara de criar, antes de o teste poder observá-los — um teste falhando
+// numa corrida a cada dez, por não ser dono dos próprios dados.
+//
+// O usuário é o DONO do schema, e não o wallet_service da aplicação: os
+// testes precisam desabilitar triggers para limpar o ledger append-only entre
+// casos, e isso exige propriedade — justamente o privilégio que a aplicação
+// não tem.
 func URL() string {
 	if u := os.Getenv("TEST_DATABASE_URL"); u != "" {
 		return u
 	}
-	return "postgres://wallet:dev@localhost:55432/wallet?sslmode=disable"
+	return "postgres://wallet:dev@localhost:5432/wallet_test?sslmode=disable"
 }
 
 // Pool devolve um pool conectado, pulando o teste se o banco não estiver de pé.

@@ -83,7 +83,9 @@ services:
     command:
       - |
         psql -h postgres -U wallet -d wallet -v ON_ERROR_STOP=1 -q -f /migrations/000001_init.up.sql
-        echo "migrations aplicadas"
+        echo "migrations aplicadas em wallet"
+        psql -h postgres -U wallet -d wallet_test -v ON_ERROR_STOP=1 -q -f /migrations/000001_init.up.sql
+        echo "migrations aplicadas em wallet_test"
 
   app-1: &app
     build: .

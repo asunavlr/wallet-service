@@ -243,17 +243,27 @@ go test -race ./...
 ### Integração (PostgreSQL real)
 
 ```sh
-make db-up && make migrate-up              # Postgres em :55432
+docker compose up -d --build               # já cria o banco `wallet_test`
 go test -race -tags integration ./test/integration/
 ```
 
-Ou aponte para outro banco com `TEST_DATABASE_URL`.
+Os testes usam o banco **`wallet_test`**, separado do `wallet` das instâncias.
+A separação importa: compartilhando o banco, os relays de outbox das
+instâncias em execução publicariam os eventos que o teste acabou de criar,
+antes de o teste poder observá-los. Aponte para outro lugar com
+`TEST_DATABASE_URL`.
 
 ### Ponta a ponta (ambiente completo)
 
 ```sh
 docker compose up -d --build
-go test -tags e2e ./test/e2e/ -v
+go test -tags e2e ./test/e2e/ -v -timeout 20m
+```
+
+### Tudo de uma vez
+
+```sh
+make test-all      # vet + unitários + -race + integração + e2e
 ```
 
 Os testes e2e usam as três instâncias e tokens reais do Keycloak.
@@ -264,7 +274,10 @@ fila, porque depois de matar uma instância as mensagens que ela tinha em mãos
 só voltam a ficar visíveis quando esse prazo expira. Use `-short` para pular os
 que mexem nos containers.
 
-**Total: 103 testes unitários, 17 de integração e 20 ponta a ponta.**
+**Total: 103 unitários · 20 de integração · 23 ponta a ponta.** Nenhum é
+pulado quando o ambiente está de pé: um cenário obrigatório pulando em
+silêncio passaria por aprovado sem nunca ter rodado, então o teste falha em
+vez de pular.
 
 ### O que é verificado
 
@@ -288,6 +301,12 @@ que mexem nos containers.
 | `OPENING` pela fila indo direto à DLQ | `test/e2e` |
 | Reinício completo preservando idempotência e pendências | `test/e2e` |
 | Queda de uma instância sem perder operação | `test/e2e` |
+| Consumidor interrompido entre o commit e a remoção | `test/integration` |
+| Mesmo `messageId` com conteúdo diferente → DLQ | `test/integration` |
+| Falha transitória devolvendo a mensagem à fila | `test/integration` |
+| Composição Fx iniciando e encerrando, com liberação de recursos | `test/e2e` |
+| Ciclo completo repetido (prova que nada vazou) | `test/e2e` |
+| Configuração inválida impedindo a subida | `test/e2e` |
 
 ---
 

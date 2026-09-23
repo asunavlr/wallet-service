@@ -1,6 +1,6 @@
 GO ?= go
 
-.PHONY: build test race vet fmt lint db-up db-down migrate-up migrate-down
+.PHONY: build test race vet fmt up down test-integration test-e2e test-all migrate-up migrate-down
 
 build:
 	$(GO) build ./...
@@ -17,18 +17,27 @@ vet:
 fmt:
 	gofmt -l -w .
 
-## banco local de desenvolvimento (os testes usam testcontainers e não dependem disto)
-db-up:
-	docker run -d --name wallet-pg -e POSTGRES_PASSWORD=dev -e POSTGRES_USER=wallet \
-		-e POSTGRES_DB=wallet -p 55432:5432 postgres:16-alpine
+## Ambiente completo (Postgres, LocalStack, Keycloak e três instâncias).
+up:
+	docker compose up -d --build
 
-db-down:
-	docker rm -f wallet-pg
+down:
+	docker compose down -v
+
+## Os testes de integração usam o Postgres do compose; os e2e, o ambiente todo.
+test-integration:
+	$(GO) test -race -tags integration ./test/integration/
+
+test-e2e:
+	$(GO) test -tags e2e ./test/e2e/ -timeout 20m
+
+## Tudo: unitários, integração e ponta a ponta. Exige o compose no ar.
+test-all: vet test race test-integration test-e2e
 
 migrate-up:
-	docker exec -i wallet-pg psql -U wallet -d wallet -v ON_ERROR_STOP=1 \
-		< internal/adapter/postgres/migrations/000001_init.up.sql
+	docker compose exec -T postgres psql -U wallet -d wallet -v ON_ERROR_STOP=1 \
+		-f /dev/stdin < internal/adapter/postgres/migrations/000001_init.up.sql
 
 migrate-down:
-	docker exec -i wallet-pg psql -U wallet -d wallet -v ON_ERROR_STOP=1 \
-		< internal/adapter/postgres/migrations/000001_init.down.sql
+	docker compose exec -T postgres psql -U wallet -d wallet -v ON_ERROR_STOP=1 \
+		-f /dev/stdin < internal/adapter/postgres/migrations/000001_init.down.sql

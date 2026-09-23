@@ -10,13 +10,23 @@ import (
 )
 
 // composeDisponivel informa se dá para manipular os containers daqui.
+//
+// Só pula quando o Docker realmente não está à mão. Se os serviços do e2e
+// estão respondendo mas o compose não, isso é problema do ambiente de teste e
+// vira FALHA, não skip: um cenário obrigatório do enunciado pulando em
+// silêncio passaria por aprovado sem nunca ter rodado.
 func composeDisponivel(t *testing.T) bool {
 	t.Helper()
-	if err := exec.Command("docker", "compose", "ps", "-q").Run(); err != nil {
-		t.Skipf("docker compose indisponível: %v", err)
+	saida, err := exec.Command("docker", "compose", "ps", "-q").CombinedOutput()
+	if err == nil {
+		return true
+	}
+	if _, errPath := exec.LookPath("docker"); errPath != nil {
+		t.Skipf("docker não encontrado no PATH: %v", errPath)
 		return false
 	}
-	return true
+	t.Fatalf("docker existe mas `compose ps` falhou: %v\n%s", err, saida)
+	return false
 }
 
 func compose(t *testing.T, args ...string) {

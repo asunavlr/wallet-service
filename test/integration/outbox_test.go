@@ -119,16 +119,35 @@ func TestDoisPublishersNaoDuplicamTrabalho(t *testing.T) {
 	r2 := worker.NewOutboxRelay(postgres.NewUnitOfWork(pool), b, app.SystemClock{}, app.NoMetrics{}, log,
 		worker.OutboxConfig{BatchSize: 5})
 
+	// Os dois publishers rodam até a outbox esvaziar, e não um número fixo
+	// de ciclos: sob disputa, um ciclo pode encontrar tudo travado pelo
+	// outro e voltar de mãos vazias. O que se verifica é a PROPRIEDADE —
+	// nenhum evento sai duas vezes e todos acabam saindo —, não uma
+	// contagem de rodadas, que dependeria de quem ganhou cada corrida.
 	var wg sync.WaitGroup
+	var mu sync.Mutex
+	var erros []error
 	partida := make(chan struct{})
+	const maxCiclos = 200
+
 	for _, r := range []*worker.OutboxRelay{r1, r2} {
 		wg.Add(1)
 		go func(r *worker.OutboxRelay) {
 			defer wg.Done()
 			<-partida
-			for i := 0; i < 5; i++ {
+			for i := 0; i < maxCiclos; i++ {
 				if _, err := r.Once(ctx); err != nil {
-					t.Error(err)
+					mu.Lock()
+					erros = append(erros, err)
+					mu.Unlock()
+					return
+				}
+				var restam int
+				if err := pool.QueryRow(ctx,
+					`SELECT count(*) FROM outbox_events WHERE published_at IS NULL`).Scan(&restam); err != nil {
+					return
+				}
+				if restam == 0 {
 					return
 				}
 			}
@@ -136,19 +155,41 @@ func TestDoisPublishersNaoDuplicamTrabalho(t *testing.T) {
 	}
 	close(partida)
 	wg.Wait()
+	for _, err := range erros {
+		t.Errorf("publisher falhou: %v", err)
+	}
 
 	// Nenhum evento pode ter sido entregue duas vezes.
-	vistos := map[uuid.UUID]int{}
+	contagem := map[uuid.UUID]int{}
 	for _, id := range append(a.IDs(), b.IDs()...) {
-		vistos[id]++
+		contagem[id]++
 	}
-	for id, n := range vistos {
+	vistos := map[uuid.UUID]bool{}
+	for id, n := range contagem {
+		vistos[id] = true
 		if n != 1 {
 			t.Errorf("evento %s publicado %d vezes, queria 1", id, n)
 		}
 	}
 	if len(vistos) != total {
 		t.Errorf("eventos distintos publicados = %d, queria %d", len(vistos), total)
+		// Diz QUAIS faltaram, e em que estado ficaram no banco.
+		linhas, err := pool.Query(ctx,
+			`SELECT event_id, event_type, published_at IS NOT NULL, attempts
+			   FROM outbox_events ORDER BY seq`)
+		if err == nil {
+			defer linhas.Close()
+			for linhas.Next() {
+				var id uuid.UUID
+				var tipo string
+				var publicado bool
+				var tentativas int
+				if err := linhas.Scan(&id, &tipo, &publicado, &tentativas); err == nil && !vistos[id] {
+					t.Logf("não entregue ao espião: %s %s publicado=%v tentativas=%d",
+						id, tipo, publicado, tentativas)
+				}
+			}
+		}
 	}
 
 	var pendentes int
