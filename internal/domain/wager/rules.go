@@ -48,6 +48,16 @@ type Reference struct {
 	// Reversed informa se essa referência já recebeu uma reversão
 	// bem-sucedida, de qualquer tipo.
 	Reversed bool
+	// Mismatch marca que a referência existe mas NÃO serve — outro jogador,
+	// outra carteira, qualquer vínculo que o caso de uso já conferiu com os
+	// identificadores resolvidos e reprovou.
+	//
+	// É um campo, e não um valor sentinela escondido em RoundID: a versão
+	// anterior marcava a divergência escrevendo "divergente" ali, e uma
+	// operação cujo roundId fosse exatamente essa string passava na
+	// comparação — bastando isso para estornar a aposta de outro jogador
+	// para a própria carteira.
+	Mismatch bool
 }
 
 // rollbackDirection diz para que lado um ROLLBACK move, por tipo revertido.
@@ -106,8 +116,14 @@ func Decide(w *wallet.Wallet, op Operation, ref *Reference, refDeclared bool) De
 		return Decision{Action: ActionMove, Direction: wallet.Debit, Amount: op.Amount}
 
 	case Win:
-		// A referência do WIN é informativa: ela amarra o ganho à aposta da
-		// rodada, mas não muda o sentido nem o valor do crédito.
+		// A referência do WIN é informativa: amarra o ganho à aposta da
+		// rodada, sem mudar o sentido nem o valor do crédito. Mas se foi
+		// informada, precisa MESMO ser uma aposta — o enunciado diz "pode
+		// informar uma aposta da mesma rodada", e um WIN citando outro WIN
+		// não descreve nada.
+		if ref != nil && ref.Kind != Bet {
+			return Decision{Action: ActionReject, Code: ReferenceKindInvalid}
+		}
 		return Decision{Action: ActionMove, Direction: wallet.Credit, Amount: op.Amount}
 
 	case Refund:
@@ -137,6 +153,10 @@ func Decide(w *wallet.Wallet, op Operation, ref *Reference, refDeclared bool) De
 // checkReference valida a coerência entre a operação e sua referência.
 // Devolve ok=false e a rejeição correspondente quando algo não bate.
 func checkReference(op Operation, ref Reference) (Decision, bool) {
+	// Divergência já apurada pelo caso de uso, com os identificadores em mãos.
+	if ref.Mismatch {
+		return Decision{Action: ActionReject, Code: ReferenceMismatch}, false
+	}
 	// Uma referência só serve depois de ter sido efetivamente processada.
 	if ref.Status != Processed {
 		if ref.Status == PendingReference {

@@ -240,3 +240,139 @@ func TestRollbackSemSaldoTemCodigoProprio(t *testing.T) {
 		t.Error("não pode ser o mesmo código da aposta sem saldo")
 	}
 }
+
+// Uma pendência precisa ser despertada quando a referência dela chega a
+// QUALQUER estado terminal — não só quando a operação move dinheiro.
+//
+// O caso concreto: um REFUND chega antes da aposta; a aposta chega e é
+// REJEITADA por saldo. A pendência não tem mais nada a esperar e deveria ser
+// reavaliada na próxima passada do worker, em vez de cumprir o backoff
+// inteiro até o TTL — que é o que o ARCHITECTURE.md promete.
+func TestPendenciaEDespertadaPorReferenciaRejeitada(t *testing.T) {
+	pool := testenv.Pool(t)
+	testenv.Reset(t, pool)
+
+	clock := &relogioFalso{t: time.Now().UTC()}
+	// backoff longo de propósito: se o despertar não acontecer, a pendência
+	// fica presa por uma hora e o teste falha.
+	politica := app.PendingPolicy{BaseDelay: time.Hour, MaxDelay: time.Hour, MaxAttempts: 5}
+	ws, ts := servicosCom(pool, clock, politica)
+	ctx := context.Background()
+
+	w, err := ws.Open(ctx, app.OpenWallet{PlayerID: uuid.New(), Initial: brl("10.00")})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 1. o REFUND chega primeiro, citando uma aposta que ainda não existe
+	pend, err := ts.Submit(ctx, operacao(w.ID(), w.PlayerID(), "tx-ref", wager.Refund, "100.00", "tx-bet"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pend.Status != wager.PendingReference {
+		t.Fatalf("= %s, queria PENDING_REFERENCE", pend.Status)
+	}
+
+	// 2. a aposta chega e é REJEITADA: 100.00 não cabe em 10.00
+	bet, err := ts.Submit(ctx, operacao(w.ID(), w.PlayerID(), "tx-bet", wager.Bet, "100.00", ""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bet.Status != wager.Rejected || bet.FailureCode != wager.InsufficientFunds {
+		t.Fatalf("aposta = %s/%s, queria REJECTED/INSUFFICIENT_FUNDS", bet.Status, bet.FailureCode)
+	}
+
+	// 3. a pendência deve ter sido despertada: nada mais a esperar.
+	var proxima time.Time
+	if err := pool.QueryRow(ctx,
+		`SELECT next_attempt_at FROM wager_transactions WHERE id=$1`, pend.TransactionID).Scan(&proxima); err != nil {
+		t.Fatal(err)
+	}
+	if proxima.After(clock.Now()) {
+		t.Fatalf("a pendência só será reavaliada em %s (daqui a %s): a referência já é terminal e ela deveria ter sido despertada",
+			proxima.Format(time.RFC3339), proxima.Sub(clock.Now()).Round(time.Second))
+	}
+
+	// 4. e o worker a resolve na passada seguinte, com o código certo.
+	log := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	resolvedor := worker.NewReferenceResolver(postgres.NewUnitOfWork(pool), ts, clock, app.NoMetrics{}, log,
+		worker.ReferenceConfig{BaseDelay: time.Hour, MaxDelay: time.Hour, MaxAttempts: 5})
+	if _, err := resolvedor.Once(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	var estado, codigo string
+	if err := pool.QueryRow(ctx,
+		`SELECT status, COALESCE(failure_code,'') FROM wager_transactions WHERE id=$1`,
+		pend.TransactionID).Scan(&estado, &codigo); err != nil {
+		t.Fatal(err)
+	}
+	if estado != string(wager.Rejected) || codigo != string(wager.ReferenceNotProcessed) {
+		t.Errorf("pendência = %s/%s, queria REJECTED/REFERENCE_NOT_PROCESSED", estado, codigo)
+	}
+
+	// o saldo nunca se moveu
+	final, _ := ws.Get(ctx, w.ID())
+	if final.Balance().String() != "10.00" {
+		t.Errorf("saldo = %s, queria 10.00 intacto", final.Balance())
+	}
+}
+
+// EXPLORAÇÃO: referência de OUTRO jogador sendo aceita.
+//
+// A checagem de coerência marcava a divergência escrevendo a string
+// "divergente" no roundId da referência, para que a comparação seguinte
+// falhasse. O buraco é evidente depois de visto: uma operação cujo roundId
+// seja literalmente "divergente" passa na comparação — e uma reversão
+// referenciando a aposta de outro jogador seria PROCESSADA, creditando a
+// carteira errada.
+func TestReferenciaDeOutroJogadorNuncaEAceita(t *testing.T) {
+	pool := testenv.Pool(t)
+	testenv.Reset(t, pool)
+
+	clock := &relogioFalso{t: time.Now().UTC()}
+	politica := app.PendingPolicy{BaseDelay: time.Second, MaxDelay: time.Minute, MaxAttempts: 3}
+	ws, ts := servicosCom(pool, clock, politica)
+	ctx := context.Background()
+
+	// vítima: apostou 50.00
+	vitima, err := ws.Open(ctx, app.OpenWallet{PlayerID: uuid.New(), Initial: brl("100.00")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	apostaDaVitima := operacao(vitima.ID(), vitima.PlayerID(), "tx-vitima", wager.Bet, "50.00", "")
+	apostaDaVitima.RoundID = "divergente" // o roundId que quebrava a checagem
+	if r, err := ts.Submit(ctx, apostaDaVitima); err != nil || r.Status != wager.Processed {
+		t.Fatalf("aposta da vítima = %v %v", r.Status, err)
+	}
+
+	// atacante: outra carteira, mesmo provedor
+	atacante, err := ws.Open(ctx, app.OpenWallet{PlayerID: uuid.New(), Initial: brl("0.00")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	estorno := operacao(atacante.ID(), atacante.PlayerID(), "tx-ataque", wager.Refund, "50.00", "tx-vitima")
+	estorno.RoundID = "divergente"
+
+	res, err := ts.Submit(ctx, estorno)
+	if err != nil {
+		t.Fatalf("erro inesperado: %v", err)
+	}
+
+	if res.Status == wager.Processed {
+		t.Fatalf("FALHA DE SEGURANÇA: estorno da aposta de outro jogador foi PROCESSADO")
+	}
+	if res.FailureCode != wager.ReferenceMismatch {
+		t.Errorf("código = %s, queria REFERENCE_MISMATCH", res.FailureCode)
+	}
+
+	// e nenhum centavo se moveu para o atacante
+	final, _ := ws.Get(ctx, atacante.ID())
+	if !final.Balance().IsZero() {
+		t.Errorf("carteira do atacante = %s, queria 0.00", final.Balance())
+	}
+	daVitima, _ := ws.Get(ctx, vitima.ID())
+	if daVitima.Balance().String() != "50.00" {
+		t.Errorf("carteira da vítima = %s, queria 50.00", daVitima.Balance())
+	}
+}

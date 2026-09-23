@@ -340,9 +340,11 @@ quem chegou antes da referência. O worker empresta só o laço e o agendamento.
 
 **Backoff** exponencial `base × 2^tentativas`, limitado ao máximo.
 
-**Despertar antecipado:** quando uma operação externa chega a estado terminal,
-as pendências que a referenciam têm o `next_attempt_at` antecipado na mesma
-transação. Sem isso, uma reversão que chegou antes esperaria o backoff inteiro
+**Despertar antecipado:** quando uma operação externa chega a QUALQUER estado
+terminal — processada, rejeitada ou falha —, as pendências que a referenciam
+têm o `next_attempt_at` antecipado na mesma transação. Vale também para quem
+não move dinheiro: uma reversão que aguarda uma aposta rejeitada não tem mais
+nada a esperar, e cumprir o backoff até o TTL seria só tempo morto. Sem isso, uma reversão que chegou antes esperaria o backoff inteiro
 depois que a referência já existe — tempo morto sem motivo.
 
 **Esgotadas as tentativas:** `REJECTED` com `REFERENCE_NOT_FOUND` (nunca

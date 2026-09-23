@@ -272,8 +272,9 @@ func coerente(ref *wager.Transaction, in Submit) (*wager.Reference, bool) {
 		// Uma referência de outro jogador ou carteira não é "não encontrada":
 		// ela existe e não serve, e isso precisa ser distinguível.
 		return &wager.Reference{
-			Kind: ref.Kind(), Status: wager.Processed, Amount: ref.Amount(),
-			RoundID: "divergente", Provider: ref.ProviderID(),
+			Kind: ref.Kind(), Status: ref.Status(), Amount: ref.Amount(),
+			RoundID: ref.RoundID(), Provider: ref.ProviderID(),
+			Mismatch: true,
 		}, false
 	}
 	return nil, true
@@ -309,7 +310,10 @@ func (s *WagerService) aplicar(
 		if err := r.Transactions.Insert(ctx, tx); err != nil {
 			return err
 		}
-		return s.enfileirarRejeitado(ctx, r, tx)
+		if err := s.enfileirarRejeitado(ctx, r, tx); err != nil {
+			return err
+		}
+		return s.despertarPendencias(ctx, r, tx, agora)
 
 	case wager.ActionNoMove:
 		// LOSS: conclui sem lançamento e sem versionar a carteira, mas emite
@@ -322,7 +326,10 @@ func (s *WagerService) aplicar(
 		if err := r.Transactions.Insert(ctx, tx); err != nil {
 			return err
 		}
-		return s.enfileirarProcessado(ctx, r, tx, nil, w.Version())
+		if err := s.enfileirarProcessado(ctx, r, tx, nil, w.Version()); err != nil {
+			return err
+		}
+		return s.despertarPendencias(ctx, r, tx, agora)
 
 	case wager.ActionMove:
 		versaoAnterior := w.Version()
@@ -359,10 +366,25 @@ func (s *WagerService) aplicar(
 		if err := s.enfileirarProcessado(ctx, r, tx, lanc, w.Version()); err != nil {
 			return err
 		}
-		// Uma operação terminal pode destravar pendências que a esperavam.
-		return r.Transactions.WakeWaitingFor(ctx, tx.ProviderID(), tx.ExternalID(), agora)
+		return s.despertarPendencias(ctx, r, tx, agora)
 	}
 	return fmt.Errorf("decisão desconhecida: %s", d.Action)
+}
+
+// despertarPendencias antecipa quem esperava por esta operação.
+//
+// Vale para QUALQUER desfecho terminal, e não só para os que movem dinheiro:
+// uma reversão que aguarda uma aposta REJEITADA não tem mais nada a esperar,
+// e deixá-la cumprir o backoff inteiro até o TTL é tempo morto — ela seria
+// recusada do mesmo jeito, só que uma hora depois.
+//
+// Uma versão anterior só despertava no caminho de movimentação, e a pendência
+// de uma referência rejeitada ficava presa até expirar.
+func (s *WagerService) despertarPendencias(ctx context.Context, r *Repos, tx *wager.Transaction, agora time.Time) error {
+	if !tx.Status().Terminal() {
+		return nil
+	}
+	return r.Transactions.WakeWaitingFor(ctx, tx.ProviderID(), tx.ExternalID(), agora)
 }
 
 func (s *WagerService) enfileirarProcessado(
@@ -504,7 +526,7 @@ func (s *WagerService) ResolvePending(ctx context.Context, r *Repos, id uuid.UUI
 	}
 	// Vínculos que Decide não enxerga porque dependem dos ids resolvidos.
 	if ref.PlayerID() != tx.PlayerID() || ref.WalletID() != tx.WalletID() {
-		dominio.RoundID = "divergente"
+		dominio.Mismatch = true
 	}
 
 	decisao := wager.Decide(w, wager.Operation{
@@ -539,7 +561,10 @@ func (s *WagerService) adiar(ctx context.Context, r *Repos, tx *wager.Transactio
 			return err
 		}
 		s.metrics.TransactionResult(string(tx.Kind()), string(wager.Rejected), "worker")
-		return s.enfileirarRejeitado(ctx, r, tx)
+		if err := s.enfileirarRejeitado(ctx, r, tx); err != nil {
+			return err
+		}
+		return s.despertarPendencias(ctx, r, tx, agora)
 	}
 
 	proxima := agora.Add(s.pending.Backoff(tx.Attempts()))
@@ -567,7 +592,10 @@ func (s *WagerService) aplicarRetomada(
 		if err := r.Transactions.Save(ctx, tx); err != nil {
 			return err
 		}
-		return s.enfileirarRejeitado(ctx, r, tx)
+		if err := s.enfileirarRejeitado(ctx, r, tx); err != nil {
+			return err
+		}
+		return s.despertarPendencias(ctx, r, tx, agora)
 
 	case wager.ActionNoMove:
 		saldo := w.Balance()
@@ -577,7 +605,10 @@ func (s *WagerService) aplicarRetomada(
 		if err := r.Transactions.Save(ctx, tx); err != nil {
 			return err
 		}
-		return s.enfileirarProcessado(ctx, r, tx, nil, w.Version())
+		if err := s.enfileirarProcessado(ctx, r, tx, nil, w.Version()); err != nil {
+			return err
+		}
+		return s.despertarPendencias(ctx, r, tx, agora)
 
 	case wager.ActionMove:
 		versaoAnterior := w.Version()
@@ -614,7 +645,7 @@ func (s *WagerService) aplicarRetomada(
 		if err := s.enfileirarProcessado(ctx, r, tx, lanc, w.Version()); err != nil {
 			return err
 		}
-		return r.Transactions.WakeWaitingFor(ctx, tx.ProviderID(), tx.ExternalID(), agora)
+		return s.despertarPendencias(ctx, r, tx, agora)
 	}
 	return fmt.Errorf("decisão desconhecida na retomada: %s", d.Action)
 }

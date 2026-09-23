@@ -228,3 +228,38 @@ func TestOpeningNaoEntraPelaBorda(t *testing.T) {
 		t.Errorf("OPENING deveria ser um tipo válido internamente: %v", err)
 	}
 }
+
+// Referência marcada como divergente pelo caso de uso é sempre recusada,
+// qualquer que seja o roundId da operação — inclusive quando ele coincide
+// com o da referência, que era o buraco da versão que usava string sentinela.
+func TestReferenciaDivergenteERecusadaSempre(t *testing.T) {
+	w := carteira(t, "100.00")
+	for _, rodada := range []string{"round-1", "divergente", ""} {
+		ref := refProcessada(wager.Bet, "50.00")
+		ref.RoundID = rodada
+		ref.Mismatch = true
+
+		o := op(wager.Refund, "50.00")
+		o.RoundID = rodada
+
+		d := wager.Decide(w, o, ref, true)
+		if d.Action != wager.ActionReject || d.Code != wager.ReferenceMismatch {
+			t.Errorf("roundId %q: = %+v, queria REJECT/REFERENCE_MISMATCH", rodada, d)
+		}
+	}
+}
+
+// WIN só referencia aposta.
+func TestWinSoReferenciaAposta(t *testing.T) {
+	w := carteira(t, "10.00")
+
+	if d := wager.Decide(w, op(wager.Win, "50.00"), refProcessada(wager.Bet, "20.00"), true); d.Action != wager.ActionMove {
+		t.Errorf("WIN citando BET = %+v, deveria passar", d)
+	}
+	for _, k := range []wager.Kind{wager.Win, wager.Refund, wager.Rollback, wager.Loss} {
+		d := wager.Decide(w, op(wager.Win, "50.00"), refProcessada(k, "20.00"), true)
+		if d.Action != wager.ActionReject || d.Code != wager.ReferenceKindInvalid {
+			t.Errorf("WIN citando %s = %+v, queria REFERENCE_KIND_INVALID", k, d)
+		}
+	}
+}
