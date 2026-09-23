@@ -312,10 +312,19 @@ fila, porque depois de matar uma instância as mensagens que ela tinha em mãos
 só voltam a ficar visíveis quando esse prazo expira. Use `-short` para pular os
 que mexem nos containers.
 
-**Total: 103 unitários · 20 de integração · 23 ponta a ponta.** Nenhum é
-pulado quando o ambiente está de pé: um cenário obrigatório pulando em
+**Total: 235 unitários · 23 de integração · 26 ponta a ponta = 284.** Nenhum
+é pulado quando o ambiente está de pé: um cenário obrigatório pulando em
 silêncio passaria por aprovado sem nunca ter rodado, então o teste falha em
 vez de pular.
+
+Todo pacote tem teste dedicado, menos `internal/bootstrap` — que é a
+composição do Fx, exercitada de verdade por `TestComposicaoFxIniciaEEncerra`
+no e2e, onde a aplicação inteira é montada, iniciada e encerrada.
+
+A cobertura por linha é baixa em `postgres`, `sqs` e `worker` de propósito: o
+que eles têm é SQL e chamada de rede, e o valor está em exercitá-los contra
+PostgreSQL e LocalStack de verdade, na suíte de integração — não em substituir
+a infraestrutura por mock para inflar o número.
 
 ### O que é verificado
 
