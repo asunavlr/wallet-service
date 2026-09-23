@@ -12,3 +12,7 @@ BEGIN
 EXCEPTION WHEN duplicate_object THEN
     NULL;
 END $$;
+
+-- A associação ao grupo acontece na primeira conexão da aplicação, depois
+-- que a migration criou wallet_app. Aqui só garantimos que o login exista.
+-- O GRANT em si vive na própria migration, junto do papel que ele concede.

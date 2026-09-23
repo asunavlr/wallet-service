@@ -14,7 +14,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -22,6 +21,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 // As três instâncias. Usar as três nos testes é o que demonstra as garantias
@@ -122,9 +123,11 @@ func esperar(t *testing.T, cond func() bool, prazo time.Duration, oque string) {
 	t.Fatalf("tempo esgotado esperando: %s", oque)
 }
 
+// uuidNovo gera um UUIDv7, como o serviço faz.
 func uuidNovo() string {
-	return fmt.Sprintf("%08x-%04x-7%03x-8%03x-%012x",
-		time.Now().UnixNano()&0xffffffff, time.Now().UnixNano()>>32&0xffff,
-		time.Now().UnixNano()>>16&0xfff, time.Now().UnixNano()>>28&0xfff,
-		time.Now().UnixNano())
+	id, err := uuid.NewV7()
+	if err != nil {
+		return uuid.NewString()
+	}
+	return id.String()
 }

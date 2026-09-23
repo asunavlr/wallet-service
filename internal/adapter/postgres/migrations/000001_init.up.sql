@@ -414,3 +414,14 @@ END $$;
 GRANT USAGE ON SCHEMA public TO wallet_app;
 GRANT SELECT, INSERT ON ledger_entries TO wallet_app;
 GRANT SELECT, INSERT, UPDATE ON wallets, wager_transactions, inbox_messages, outbox_events TO wallet_app;
+
+-- O login da aplicação entra no grupo aqui, e não no script de init do
+-- Postgres: lá o papel wallet_app ainda não existe, porque é esta migration
+-- que o cria. Se o login ainda não tiver sido criado (execução fora do
+-- compose), a associação é simplesmente pulada.
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'wallet_service') THEN
+        GRANT wallet_app TO wallet_service;
+    END IF;
+END $$;

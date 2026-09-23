@@ -11,15 +11,23 @@ package auth
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/coreos/go-oidc/v3/oidc"
 )
 
-// ErrUnauthenticated indica credencial ausente, inválida ou expirada.
-var ErrUnauthenticated = errors.New("auth: não autenticado")
+var (
+	// ErrUnauthenticated indica credencial ausente, inválida ou expirada.
+	ErrUnauthenticated = errors.New("auth: não autenticado")
+	// ErrDescoberta indica falha ao obter a configuração do IdP.
+	ErrDescoberta = errors.New("auth: descoberta do IdP")
+)
 
 // Claims são os campos que o serviço lê do token.
 type Claims struct {
@@ -62,35 +70,99 @@ type Config struct {
 // automática: a validação de assinatura não faz ida e volta ao Keycloak a
 // cada requisição, mas acompanha rotação de chave.
 func New(ctx context.Context, c Config) (*Verifier, error) {
-	descoberta := c.DiscoveryURL
-	if descoberta == "" {
-		descoberta = c.IssuerURL
-	}
-	if descoberta != c.IssuerURL {
-		// Permite buscar a configuração num endereço e exigir outro no `iss`.
-		// O nome da função é alarmante, mas o que ela desliga é só a
-		// checagem de que a URL consultada coincide com o emissor anunciado;
-		// a validação do `iss` de cada token continua valendo abaixo.
-		ctx = oidc.InsecureIssuerURLContext(ctx, c.IssuerURL)
-	}
-	provider, err := oidc.NewProvider(ctx, descoberta)
-	if err != nil {
-		return nil, fmt.Errorf("descobrindo o IdP em %s: %w", descoberta, err)
-	}
 	cfg := &oidc.Config{
 		ClientID:             c.Audience,
 		SupportedSigningAlgs: []string{oidc.RS256},
 	}
 	if c.Audience == "" {
-		// Sem audience configurada, a checagem é desligada explicitamente em
-		// vez de aceitar qualquer valor por omissão.
+		// Sem audience configurada, a checagem é desligada explicitamente,
+		// em vez de aceitar qualquer valor por omissão.
 		cfg.SkipClientIDCheck = true
 	}
 	escopo := c.InternalScope
 	if escopo == "" {
 		escopo = "wallets:write"
 	}
-	return &Verifier{verificador: provider.Verifier(cfg), escopoInterno: escopo}, nil
+
+	jwks, err := enderecoJWKS(ctx, c)
+	if err != nil {
+		return nil, err
+	}
+	// O emissor exigido é sempre c.IssuerURL: a validação do `iss` de cada
+	// token não afrouxa. O que muda é apenas de ONDE as chaves vêm.
+	verificador := oidc.NewVerifier(c.IssuerURL, oidc.NewRemoteKeySet(ctx, jwks), cfg)
+	return &Verifier{verificador: verificador, escopoInterno: escopo}, nil
+}
+
+// enderecoJWKS descobre onde buscar as chaves públicas.
+//
+// Quando o IdP é visto por nomes diferentes de dentro e de fora da rede, o
+// documento de descoberta anuncia o `jwks_uri` com o nome EXTERNO — que é o
+// correto para um navegador e inalcançável de dentro de um container. Aqui a
+// descoberta é feita pelo endereço interno e o host do `jwks_uri` é reescrito
+// para esse mesmo endereço, preservando o caminho que o IdP indicou.
+//
+// Isso não é particularidade de Docker: acontece igual com service mesh, onde
+// o emissor é público e o serviço fala com o IdP por um endereço interno.
+func enderecoJWKS(ctx context.Context, c Config) (string, error) {
+	descoberta := c.DiscoveryURL
+	if descoberta == "" {
+		descoberta = c.IssuerURL
+	}
+
+	doc, err := baixarDescoberta(ctx, descoberta)
+	if err != nil {
+		return "", err
+	}
+	if doc.JWKSURI == "" {
+		return "", fmt.Errorf("%w: o IdP não anunciou jwks_uri", ErrDescoberta)
+	}
+	// O emissor anunciado precisa ser o que exigimos dos tokens; divergência
+	// aqui significaria validar contra um emissor que não é o do IdP.
+	if doc.Issuer != c.IssuerURL {
+		return "", fmt.Errorf("%w: o IdP anuncia o emissor %q, mas a configuração exige %q",
+			ErrDescoberta, doc.Issuer, c.IssuerURL)
+	}
+	if descoberta == c.IssuerURL {
+		return doc.JWKSURI, nil
+	}
+
+	anunciado, err := url.Parse(doc.JWKSURI)
+	if err != nil {
+		return "", fmt.Errorf("%w: jwks_uri inválido: %s", ErrDescoberta, err)
+	}
+	interno, err := url.Parse(descoberta)
+	if err != nil {
+		return "", fmt.Errorf("%w: OIDC_DISCOVERY_URL inválida: %s", ErrDescoberta, err)
+	}
+	anunciado.Scheme, anunciado.Host = interno.Scheme, interno.Host
+	return anunciado.String(), nil
+}
+
+type documentoOIDC struct {
+	Issuer  string `json:"issuer"`
+	JWKSURI string `json:"jwks_uri"`
+}
+
+func baixarDescoberta(ctx context.Context, base string) (documentoOIDC, error) {
+	endereco := strings.TrimSuffix(base, "/") + "/.well-known/openid-configuration"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endereco, nil)
+	if err != nil {
+		return documentoOIDC{}, err
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return documentoOIDC{}, fmt.Errorf("%w: %s inacessível: %s", ErrDescoberta, endereco, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return documentoOIDC{}, fmt.Errorf("%w: %s devolveu %d", ErrDescoberta, endereco, resp.StatusCode)
+	}
+	var doc documentoOIDC
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&doc); err != nil {
+		return documentoOIDC{}, fmt.Errorf("%w: resposta ilegível de %s: %s", ErrDescoberta, endereco, err)
+	}
+	return doc, nil
 }
 
 // Verify valida o token e extrai os claims.
