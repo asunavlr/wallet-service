@@ -40,7 +40,18 @@ type Verifier struct {
 
 // Config é a configuração do verificador.
 type Config struct {
-	IssuerURL     string
+	// IssuerURL é o que os tokens declaram em `iss`, e é contra ele que a
+	// validação acontece.
+	IssuerURL string
+	// DiscoveryURL é o endereço por onde ESTE processo alcança o IdP na
+	// rede. Normalmente igual a IssuerURL; difere quando o IdP é visto por
+	// nomes distintos de dentro e de fora da rede — o caso do container
+	// (`http://keycloak:8080`) contra o navegador (`http://localhost:8081`),
+	// e também o de um service mesh com emissor público.
+	//
+	// A validação continua estrita: o `iss` do token precisa bater com
+	// IssuerURL. O que muda é apenas ONDE o JWKS é buscado.
+	DiscoveryURL  string
 	Audience      string
 	InternalScope string
 }
@@ -51,9 +62,20 @@ type Config struct {
 // automática: a validação de assinatura não faz ida e volta ao Keycloak a
 // cada requisição, mas acompanha rotação de chave.
 func New(ctx context.Context, c Config) (*Verifier, error) {
-	provider, err := oidc.NewProvider(ctx, c.IssuerURL)
+	descoberta := c.DiscoveryURL
+	if descoberta == "" {
+		descoberta = c.IssuerURL
+	}
+	if descoberta != c.IssuerURL {
+		// Permite buscar a configuração num endereço e exigir outro no `iss`.
+		// O nome da função é alarmante, mas o que ela desliga é só a
+		// checagem de que a URL consultada coincide com o emissor anunciado;
+		// a validação do `iss` de cada token continua valendo abaixo.
+		ctx = oidc.InsecureIssuerURLContext(ctx, c.IssuerURL)
+	}
+	provider, err := oidc.NewProvider(ctx, descoberta)
 	if err != nil {
-		return nil, fmt.Errorf("descobrindo o IdP em %s: %w", c.IssuerURL, err)
+		return nil, fmt.Errorf("descobrindo o IdP em %s: %w", descoberta, err)
 	}
 	cfg := &oidc.Config{
 		ClientID:             c.Audience,

@@ -154,8 +154,8 @@ var modAutenticacao = fx.Module("autenticacao",
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
 			return auth.New(ctx, auth.Config{
-				IssuerURL: c.OIDCIssuer, Audience: c.OIDCAudience,
-				InternalScope: c.OIDCInternalScope,
+				IssuerURL: c.OIDCIssuer, DiscoveryURL: c.OIDCDiscovery,
+				Audience: c.OIDCAudience, InternalScope: c.OIDCInternalScope,
 			})
 		},
 		func(v *auth.Verifier) httpapi.Autenticador { return v },

@@ -46,17 +46,27 @@ services:
     environment:
       KC_BOOTSTRAP_ADMIN_USERNAME: admin
       KC_BOOTSTRAP_ADMIN_PASSWORD: admin
-      KC_HEALTH_ENABLED: "true"
+      # Fixa o emissor dos tokens no endereço EXTERNO, que é o que clientes
+      # de fora da rede usam. As aplicações continuam alcançando o Keycloak
+      # pelo nome do serviço (OIDC_DISCOVERY_URL) e exigindo este `iss`.
+      KC_HOSTNAME: http://localhost:8081
+      KC_HOSTNAME_STRICT: "false"
+      KC_HTTP_ENABLED: "true"
     ports: ["8081:8080"]
     volumes:
       # Provisionamento automático do realm: o enunciado exige que o IdP suba
       # configurado, sem passo manual.
       - ./deploy/keycloak:/opt/keycloak/data/import:ro
+    # O endpoint do realm é o melhor sinal de prontidão: ele só responde 200
+    # depois que o import terminou, que é o que as aplicações precisam.
+    # A imagem não traz curl nem wget, então a checagem usa o /dev/tcp do
+    # bash, que ela tem.
     healthcheck:
-      test: ["CMD-SHELL", "exec 3<>/dev/tcp/localhost/9000 && echo -e 'GET /health/ready HTTP/1.1\\nhost: localhost\\n' >&3 && cat <&3 | grep -q '\"UP\"'"]
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/127.0.0.1/8080 && printf 'GET /realms/wallet HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n' >&3 && grep -q '200 OK' <&3"]
       interval: 5s
-      timeout: 5s
-      retries: 40
+      timeout: 10s
+      retries: 60
+      start_period: 30s
 
   # As migrations rodam como DONO do schema, separadas da aplicação, que
   # conecta com o papel restrito. Se a aplicação pudesse migrar, poderia
@@ -92,7 +102,10 @@ services:
       AWS_ACCESS_KEY_ID: test
       AWS_SECRET_ACCESS_KEY: test
       SQS_SENDER_PROVIDERS: 000000000000=*
-      OIDC_ISSUER_URL: http://keycloak:8080/realms/wallet
+      # O token declara o emissor externo; o processo alcança o IdP pelo
+      # nome do serviço. A validação do `iss` continua estrita.
+      OIDC_ISSUER_URL: http://localhost:8081/realms/wallet
+      OIDC_DISCOVERY_URL: http://keycloak:8080/realms/wallet
       OIDC_INTERNAL_SCOPE: wallets:write
     ports: ["8080:8080"]
     healthcheck:

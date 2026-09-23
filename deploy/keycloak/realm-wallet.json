@@ -4,6 +4,17 @@
   "displayName": "Wallet Service",
   "sslRequired": "none",
   "accessTokenLifespan": 300,
+  "clientScopes": [
+    {
+      "name": "wallets:write",
+      "description": "Operacoes internas de carteira",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "true",
+        "display.on.consent.screen": "false"
+      }
+    }
+  ],
   "clients": [
     {
       "clientId": "provider-a",
@@ -34,6 +45,9 @@
             "userinfo.token.claim": "true"
           }
         }
+      ],
+      "defaultClientScopes": [
+        "roles"
       ]
     },
     {
@@ -65,6 +79,9 @@
             "userinfo.token.claim": "true"
           }
         }
+      ],
+      "defaultClientScopes": [
+        "roles"
       ]
     },
     {
@@ -80,21 +97,10 @@
       "attributes": {
         "access.token.lifespan": "300"
       },
-      "protocolMappers": [
-        {
-          "name": "scope-estatico",
-          "protocol": "openid-connect",
-          "protocolMapper": "oidc-hardcoded-claim-mapper",
-          "consentRequired": false,
-          "config": {
-            "claim.name": "scope",
-            "claim.value": "wallets:write",
-            "jsonType.label": "String",
-            "id.token.claim": "true",
-            "access.token.claim": "true",
-            "userinfo.token.claim": "true"
-          }
-        }
+      "protocolMappers": [],
+      "defaultClientScopes": [
+        "roles",
+        "wallets:write"
       ]
     }
   ]

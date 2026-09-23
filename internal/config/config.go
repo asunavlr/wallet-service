@@ -36,6 +36,7 @@ type Config struct {
 	SQSSenderProviders map[string]string
 
 	OIDCIssuer        string
+	OIDCDiscovery     string
 	OIDCAudience      string
 	OIDCInternalScope string
 
@@ -77,6 +78,7 @@ func Load() (Config, error) {
 		SQSSenderProviders: mapa("SQS_SENDER_PROVIDERS"),
 
 		OIDCIssuer:        texto("OIDC_ISSUER_URL", ""),
+		OIDCDiscovery:     texto("OIDC_DISCOVERY_URL", ""),
 		OIDCAudience:      texto("OIDC_AUDIENCE", ""),
 		OIDCInternalScope: texto("OIDC_INTERNAL_SCOPE", "wallets:write"),
 
