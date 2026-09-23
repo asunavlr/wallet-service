@@ -83,7 +83,7 @@ func Load() (Config, error) {
 		OIDCInternalScope: texto("OIDC_INTERNAL_SCOPE", "wallets:write"),
 
 		OutboxInterval:    duracao("OUTBOX_INTERVAL", time.Second),
-		OutboxBatch:       inteiro("OUTBOX_BATCH", 20),
+		OutboxBatch:       inteiro("OUTBOX_BATCH", 100),
 		OutboxMaxAttempts: inteiro("OUTBOX_MAX_ATTEMPTS", 8),
 
 		PendingInterval:    duracao("PENDING_INTERVAL", 2*time.Second),

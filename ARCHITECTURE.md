@@ -415,6 +415,18 @@ aberta devolve o lock ao banco — outro assume o mesmo evento.
 ao exigir que republicações preservem o `eventId`; o consumidor deduplica por
 ele.
 
+**O relay DRENA em vez de esperar o próximo tique.** Um ciclo que publicou o
+lote inteiro significa que provavelmente há mais, e dormir um segundo ali é
+deixar a outbox acumular. Ele só volta a esperar quando um ciclo traz menos
+que o lote — o sinal de que alcançou a fila.
+
+Sem isso o teto era lote/intervalo por instância: com 20 e 1 s, sessenta
+eventos por segundo entre três instâncias. Medido numa rajada de ~2.700
+operações, a outbox acumulava 3.940 eventos e levava mais de um minuto para
+escoar; com o dreno, a fila não chega a se formar. Carga sustentada acima do
+teto deixaria a outbox permanentemente atrás, com os eventos chegando tarde ao
+consumidor — e a métrica `outbox_pending_age_seconds` subindo sem parar.
+
 A chamada ao destino tem timeout curto, porque o lock é mantido enquanto ela
 acontece. Backoff exponencial em `attempts`/`next_attempt_at`; esgotadas as
 tentativas, o evento é marcado como dead-lettered e a métrica sobe.

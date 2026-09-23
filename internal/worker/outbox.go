@@ -42,7 +42,9 @@ func NewOutboxRelay(uow app.UnitOfWork, p app.Publisher, c app.Clock, m app.Metr
 		cfg.Interval = time.Second
 	}
 	if cfg.BatchSize <= 0 {
-		cfg.BatchSize = 20
+		// 100 e não 20: o custo por evento é dominado pela ida ao SQS, e o
+		// lote maior amortiza a transação que o envolve.
+		cfg.BatchSize = 100
 	}
 	if cfg.BaseDelay <= 0 {
 		cfg.BaseDelay = time.Second
@@ -60,6 +62,16 @@ func NewOutboxRelay(uow app.UnitOfWork, p app.Publisher, c app.Clock, m app.Metr
 }
 
 // Run roda até o contexto ser cancelado.
+//
+// Com fila cheia, o relay DRENA em vez de esperar o próximo tique: um ciclo
+// que publicou o lote inteiro significa que provavelmente há mais, e dormir
+// um segundo ali é deixar a outbox acumular. Ele só volta a esperar quando um
+// ciclo traz menos que o lote — o sinal de que alcançou a fila.
+//
+// Sem isso o teto é lote/intervalo por instância: com 20 e 1s, sessenta
+// eventos por segundo entre três instâncias. Uma rajada de alguns milhares
+// levava minutos para escoar, e carga sustentada acima disso deixava a outbox
+// permanentemente atrás — com os eventos chegando tarde ao consumidor.
 func (r *OutboxRelay) Run(ctx context.Context) {
 	tick := time.NewTicker(r.cfg.Interval)
 	defer tick.Stop()
@@ -69,11 +81,36 @@ func (r *OutboxRelay) Run(ctx context.Context) {
 			r.log.Info("relay da outbox encerrado")
 			return
 		case <-tick.C:
-			if n, err := r.Once(ctx); err != nil && ctx.Err() == nil {
+			r.drenar(ctx)
+		}
+	}
+}
+
+// drenar publica lotes enquanto houver fila, respeitando o cancelamento.
+//
+// O limite de voltas existe para que um fluxo contínuo de eventos novos não
+// prenda o laço para sempre: passado ele, o relay volta ao tique e dá vez ao
+// encerramento.
+func (r *OutboxRelay) drenar(ctx context.Context) {
+	const maxVoltas = 50
+	for volta := 0; volta < maxVoltas; volta++ {
+		if ctx.Err() != nil {
+			return
+		}
+		n, err := r.Once(ctx)
+		if err != nil {
+			if ctx.Err() == nil {
 				r.log.Error("ciclo do relay falhou", slog.String("erro", err.Error()))
-			} else if n > 0 {
-				r.log.Debug("eventos publicados", slog.Int("quantidade", n))
 			}
+			return
+		}
+		if n > 0 {
+			r.log.Debug("eventos publicados", slog.Int("quantidade", n))
+		}
+		// Lote incompleto: a fila acabou (ou o que sobrou está travado por
+		// outro publisher, que vai cuidar dele).
+		if n < r.cfg.BatchSize {
+			return
 		}
 	}
 }
