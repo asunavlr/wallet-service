@@ -34,10 +34,19 @@ test-e2e:
 ## Tudo: unitários, integração e ponta a ponta. Exige o compose no ar.
 test-all: vet test race test-integration test-e2e
 
+## Migrations. DB=wallet por padrão; DB=wallet_test para o banco dos testes.
+## O serviço `migrate` do compose já aplica nos dois ao subir; estes alvos
+## servem para exercitar aplicação e reversão à mão.
+DB ?= wallet
+
 migrate-up:
-	docker compose exec -T postgres psql -U wallet -d wallet -v ON_ERROR_STOP=1 \
+	docker compose exec -T postgres psql -U wallet -d $(DB) -v ON_ERROR_STOP=1 \
 		-f /dev/stdin < internal/adapter/postgres/migrations/000001_init.up.sql
 
+## ATENÇÃO: derruba as tabelas e APAGA os dados do banco escolhido. Com as
+## instâncias no ar, elas passam a errar até um migrate-up. É o comportamento
+## esperado de uma reversão — mas é bom saber antes de rodar.
 migrate-down:
-	docker compose exec -T postgres psql -U wallet -d wallet -v ON_ERROR_STOP=1 \
+	@printf 'Reverter a migration em "$(DB)" apaga todos os dados. Enter para seguir, Ctrl-C para abortar: '; read _
+	docker compose exec -T postgres psql -U wallet -d $(DB) -v ON_ERROR_STOP=1 \
 		-f /dev/stdin < internal/adapter/postgres/migrations/000001_init.down.sql

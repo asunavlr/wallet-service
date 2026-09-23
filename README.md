@@ -52,18 +52,28 @@ docker compose down -v    # -v também apaga o volume do Postgres
 Versionadas em `internal/adapter/postgres/migrations/`, com aplicação e
 reversão separadas.
 
-```sh
-# aplicar (é o que o serviço `migrate` do compose faz)
-docker compose run --rm migrate
+O `docker compose up` já aplica as migrations nos dois bancos (`wallet` e
+`wallet_test`) antes de as instâncias subirem. Para exercitá-las à mão:
 
-# ou manualmente, contra um Postgres já de pé
+```sh
+make migrate-up                  # banco wallet
+make migrate-up DB=wallet_test   # banco dos testes
+make migrate-down                # reverte — pede confirmação, apaga os dados
+```
+
+Ou direto, contra qualquer Postgres:
+
+```sh
 psql "$DATABASE_URL" -v ON_ERROR_STOP=1 \
   -f internal/adapter/postgres/migrations/000001_init.up.sql
 
-# reverter
 psql "$DATABASE_URL" -v ON_ERROR_STOP=1 \
   -f internal/adapter/postgres/migrations/000001_init.down.sql
 ```
+
+A reversão derruba tabelas, funções e triggers. Com as instâncias no ar, elas
+passam a errar até um `migrate-up` — que é o comportamento esperado de uma
+reversão, não um defeito.
 
 A reversão derruba as tabelas e funções, mas **não** remove o papel
 `wallet_app`: papéis são do cluster inteiro e podem ser compartilhados. Para
