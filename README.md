@@ -8,6 +8,61 @@ Go 1.27 · Uber Fx · PostgreSQL · AWS SQS (LocalStack) · Keycloak
 
 ---
 
+## Avaliar em dois comandos
+
+Precisa de **Docker** e **Go 1.27**. Nada mais.
+
+```sh
+docker compose up -d --build     # ~1 min: Postgres, LocalStack, Keycloak e 3 instâncias
+make verificar                   # ~2 min: roda os 284 testes e confere o enunciado
+```
+
+O segundo comando percorre as exigências do desafio e imprime a evidência de
+cada uma — o teste que passou, a constraint que existe no banco, a rota que
+recusa, a integridade dos dados naquele instante. Nada ali é afirmação: são
+comandos executados na hora.
+
+A saída termina assim:
+
+```
+OS 8 CENÁRIOS OBRIGATÓRIOS
+  ✓ 1 · mesma aposta 50x em paralelo  (TestCinquentaEnviosDaMesmaApostaDebitamUmaVez)
+  ✓ 2 · 100.00 com duas apostas de 80.00  (TestDuasApostasDisputandoOMesmoSaldo)
+  …
+RESULTADO
+  40 verificações OK, 0 falharam
+
+  Tudo confere.
+```
+
+Se alguma linha vier com `✗`, ela diz qual teste falhou ou não foi executado —
+**um teste ausente conta como falha**, porque um cenário obrigatório que não
+roda não prova nada.
+
+Ao terminar:
+
+```sh
+docker compose down -v
+```
+
+<details>
+<summary>Rodar as suítes separadamente</summary>
+
+```sh
+make test          # 235 unitários, sem dependência externa
+make race          # os mesmos com -race
+make test-integration   # 23, contra PostgreSQL real
+make test-e2e           # 26, contra as 3 instâncias com Keycloak real
+make test-all           # tudo acima
+```
+
+`make verificar` já executa todas elas — estes alvos servem para isolar uma
+suíte durante o desenvolvimento.
+
+</details>
+
+---
+
 ## Como rodar
 
 ### Pré-requisitos
@@ -249,11 +304,8 @@ dinheiro que já saiu da carteira, que é incidente.
 
 ## Testes
 
-```sh
-go vet ./...
-go test ./...                              # unitários, sem dependência externa
-go test -race ./...
-```
+Para apenas avaliar, use `make verificar` (veja o topo). Esta seção detalha o
+que cada suíte cobre.
 
 ### Integração (PostgreSQL real)
 

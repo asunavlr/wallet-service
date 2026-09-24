@@ -16,16 +16,30 @@ sec(){ printf '\n\033[1m%s\033[0m\n' "$1"; }
 
 # checa(rótulo, comando): o comando precisa sair com 0
 checa() { local r="$1"; shift; if "$@" >/dev/null 2>&1; then v "$r"; else x "$r"; fi; }
-# teste(rótulo, padrão): o teste com aquele nome precisa passar
+
+# As três suítes rodam UMA vez cada, e as checagens consultam a saída
+# capturada. Rodar `go test -run` por exigência recompilava o projeto inteiro
+# a cada linha: trinta vezes o mesmo trabalho, e a conferência ficava mais
+# lenta que a suíte que ela confere.
+RESULTADOS=$(mktemp)
+trap 'rm -f "$RESULTADOS"' EXIT
+
+printf 'Rodando as três suítes (leva cerca de dois minutos)...\n'
+go test -count=1 ./... -v                                  2>&1 >>"$RESULTADOS" || true
+go test -count=1 -tags integration ./test/integration/ -v  2>&1 >>"$RESULTADOS" || true
+go test -count=1 -tags e2e ./test/e2e/ -v -timeout 25m     2>&1 >>"$RESULTADOS" || true
+
+# teste(rótulo, nome): aquele teste precisa constar como PASS na saída.
+# Ausente conta como falha — um teste que não rodou não prova nada.
 teste() {
-  local r="$1" p="$2" tags="${3:-}"
-  local saida
-  if [ -n "$tags" ]; then
-    saida=$(go test -count=1 -tags "$tags" ./... -run "$p" 2>&1)
+  local r="$1" nome="$2"
+  if grep -q -- "--- PASS: ${nome}\b" "$RESULTADOS"; then
+    v "$r  ($nome)"
+  elif grep -q -- "--- \(FAIL\|SKIP\): ${nome}\b" "$RESULTADOS"; then
+    x "$r  ($nome falhou ou foi pulado)"
   else
-    saida=$(go test -count=1 ./... -run "$p" 2>&1)
+    x "$r  ($nome não foi executado)"
   fi
-  if echo "$saida" | grep -q "FAIL"; then x "$r"; else v "$r  ($p)"; fi
 }
 # sql(rótulo, consulta, esperado)
 sql() {
@@ -42,15 +56,15 @@ checa "dependências reproduzíveis (go.sum versionado)" test -f go.sum
 
 sec "ELIMINATÓRIOS"
 teste "dinheiro nunca passa por float (varredura da AST)" "TestNenhumFloatNoCaminhoDoDinheiro"
-teste "idempotência sobrevive ao reinício dos processos"  "TestIdempotenciaSobreviveAoReinicio" integration
-teste "sem saldo negativo por concorrência"               "TestDuasApostasDisputandoOMesmoSaldo" integration
-teste "sem movimentação duplicada"                        "TestCinquentaEnviosDaMesmaApostaDebitamUmaVez" integration
-teste "evento só é publicado depois do commit"            "TestEventoSoApareceDepoisDoCommit" integration
-teste "não depende de uma instância única"                "TestDoisPublishersNaoDuplicamTrabalho" integration
+teste "idempotência sobrevive ao reinício dos processos"  "TestIdempotenciaSobreviveAoReinicio"
+teste "sem saldo negativo por concorrência"               "TestDuasApostasDisputandoOMesmoSaldo"
+teste "sem movimentação duplicada"                        "TestCinquentaEnviosDaMesmaApostaDebitamUmaVez"
+teste "evento só é publicado depois do commit"            "TestEventoSoApareceDepoisDoCommit"
+teste "não depende de uma instância única"                "TestDoisPublishersNaoDuplicamTrabalho"
 teste "rotas de negócio exigem autenticação"              "TestRotasDeNegocioExigemCredencial"
-teste "nenhum acesso não autorizado a operações"          "TestIsolamentoEntreProvedores" e2e
-teste "provedor não navega em carteira alheia"            "TestProvedorNaoNavegaEmCarteira" e2e
-teste "infra real nos testes (Postgres, SQS, IdP)"        "TestTresInstanciasNoAr" e2e
+teste "nenhum acesso não autorizado a operações"          "TestIsolamentoEntreProvedores"
+teste "provedor não navega em carteira alheia"            "TestProvedorNaoNavegaEmCarteira"
+teste "infra real nos testes (Postgres, SQS, IdP)"        "TestTresInstanciasNoAr"
 
 sec "INVARIANTES IMPOSTAS PELO BANCO"
 # A checagem nomeia a constraint em vez de contar por padrão: contar
@@ -75,19 +89,19 @@ sql "nenhum evento na dead-letter"    "select count(*) from outbox_events where 
 sql "nenhuma transação em PENDING"    "select count(*) from wager_transactions where status='PENDING'" "0"
 
 sec "OS 8 CENÁRIOS OBRIGATÓRIOS"
-teste "1 · mesma aposta 50x em paralelo"          "TestCinquentaEnviosDaMesmaApostaDebitamUmaVez" integration
-teste "2 · 100.00 com duas apostas de 80.00"      "TestDuasApostasDisputandoOMesmoSaldo" integration
-teste "3 · carteiras distintas em paralelo"       "TestCarteirasDistintasAvancamEmParalelo" integration
-teste "4 · três instâncias independentes"         "TestDuasApostasEmInstanciasDiferentes" e2e
-teste "5 · consumidor morto antes de remover"     "TestConsumidorInterrompidoAntesDeRemoverAMensagem" integration
-teste "6 · dois publishers na mesma outbox"       "TestDoisPublishersNaoDuplicamTrabalho" integration
-teste "7 · reversão antes da referência"          "TestReversaoChegandoAntesDaReferencia" integration
-teste "8 · reinício completo da aplicação"        "TestEstadoSobreviveAoReinicioCompleto" e2e
+teste "1 · mesma aposta 50x em paralelo"          "TestCinquentaEnviosDaMesmaApostaDebitamUmaVez"
+teste "2 · 100.00 com duas apostas de 80.00"      "TestDuasApostasDisputandoOMesmoSaldo"
+teste "3 · carteiras distintas em paralelo"       "TestCarteirasDistintasAvancamEmParalelo"
+teste "4 · três instâncias independentes"         "TestDuasApostasEmInstanciasDiferentes"
+teste "5 · consumidor morto antes de remover"     "TestConsumidorInterrompidoAntesDeRemoverAMensagem"
+teste "6 · dois publishers na mesma outbox"       "TestDoisPublishersNaoDuplicamTrabalho"
+teste "7 · reversão antes da referência"          "TestReversaoChegandoAntesDaReferencia"
+teste "8 · reinício completo da aplicação"        "TestEstadoSobreviveAoReinicioCompleto"
 
 sec "ALÉM DO EXIGIDO"
-teste "composição Fx inicia e encerra"            "TestComposicaoFxIniciaEEncerra" e2e
-teste "SIGTERM com trabalho em voo"               "TestSigtermComTrabalhoEmVoo" e2e
-teste "PostgreSQL caindo no meio do tráfego"      "TestPostgresCaindoNoMeioDoTrafego" e2e
+teste "composição Fx inicia e encerra"            "TestComposicaoFxIniciaEEncerra"
+teste "SIGTERM com trabalho em voo"               "TestSigtermComTrabalhoEmVoo"
+teste "PostgreSQL caindo no meio do tráfego"      "TestPostgresCaindoNoMeioDoTrafego"
 
 sec "RESULTADO"
 printf "  %d verificações OK, %d falharam\n" "$ok" "$falhou"
